@@ -345,7 +345,11 @@ def skeleton_dynamics(q_val, u_val, torques_val, params_val):
         M_mat = M_mat_cpu.to(device)
         F_mat = F_mat_cpu.to(device)
         
-        dx_dt = torch.linalg.solve(M_mat, F_mat).squeeze(-1)
+        # Solve in double precision to prevent float32 ill-conditioning
+        M_mat_double = M_mat.double()
+        F_mat_double = F_mat.double()
+        eye = torch.eye(18, device=device, dtype=torch.float64)
+        dx_dt = torch.linalg.solve(M_mat_double + 1e-6 * eye, F_mat_double).float().squeeze(-1)
     else:
         q_list = list(q_cpu)
         u_list = list(u_cpu)
@@ -365,7 +369,18 @@ def skeleton_dynamics(q_val, u_val, torques_val, params_val):
         M_mat = M_mat_cpu.to(device)
         F_mat = F_mat_cpu.to(device)
         
-        dx_dt = torch.linalg.solve(M_mat, F_mat).squeeze(-1)
+        # Solve in double precision to prevent float32 ill-conditioning
+        M_mat_double = M_mat.double()
+        F_mat_double = F_mat.double()
+        eye = torch.eye(18, device=device, dtype=torch.float64)
+        try:
+            dx_dt = torch.linalg.solve(M_mat_double + 1e-6 * eye, F_mat_double).float().squeeze(-1)
+        except Exception as e:
+            print("\n=== SOLVER FAILED ===")
+            print("M_mat contains NaN:", torch.isnan(M_mat).any().item())
+            print("M_mat contains inf:", torch.isinf(M_mat).any().item())
+            print("q_list:", [val.item() if isinstance(val, torch.Tensor) else val for val in q_list])
+            raise e
         
     return dx_dt[..., :9], dx_dt[..., 9:]
 

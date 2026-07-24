@@ -177,7 +177,32 @@ def step_environment(q, u, q_ref, params, dt_sim=0.002, dt_control=0.1, mtg_cont
     q_ref = q_ref.to(device=device, dtype=torch.float32)
     params = params.to(device=device, dtype=torch.float32)
     
+    # Track failed envs
+    if q.ndim > 1:
+        nan_occurred = torch.zeros(q.shape[0], dtype=torch.bool, device=device)
+    else:
+        nan_occurred = False
+        
     for _ in range(num_steps):
+        if q_curr.ndim > 1:
+            step_nan = torch.isnan(q_curr).any(dim=-1) | torch.isinf(q_curr).any(dim=-1) | \
+                       torch.isnan(u_curr).any(dim=-1) | torch.isinf(u_curr).any(dim=-1)
+            nan_occurred |= step_nan
+            if step_nan.any():
+                q_curr[step_nan] = 0.0
+                q_curr[step_nan, 1] = 0.90
+                u_curr[step_nan] = 0.0
+                tau_curr[step_nan] = 0.0
+        else:
+            step_nan = torch.isnan(q_curr).any() or torch.isinf(q_curr).any() or \
+                       torch.isnan(u_curr).any() or torch.isinf(u_curr).any()
+            if step_nan:
+                nan_occurred = True
+                q_curr = torch.zeros_like(q_curr)
+                q_curr[1] = 0.90
+                u_curr = torch.zeros_like(u_curr)
+                tau_curr = torch.zeros_like(tau_curr)
+
         def get_torques(q_t, u_t):
             q_j = q_t[..., 3:9]
             u_j = u_t[..., 3:9]
@@ -185,6 +210,14 @@ def step_environment(q, u, q_ref, params, dt_sim=0.002, dt_control=0.1, mtg_cont
             
         q_curr, u_curr, tau_curr = rk4_step(q_curr, u_curr, get_torques, params, dt_sim)
         
+    # Inject NaN in q_curr[0] to let the environment step know
+    if q.ndim > 1:
+        if nan_occurred.any():
+            q_curr[nan_occurred, 0] = float('nan')
+    else:
+        if nan_occurred:
+            q_curr[0] = float('nan')
+            
     return q_curr, u_curr, tau_curr
 
 if __name__ == '__main__':

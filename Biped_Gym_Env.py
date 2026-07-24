@@ -72,8 +72,8 @@ class BipedAMPEnv(gym.Env):
             self.u = torch.zeros(9, dtype=torch.float32, device=self.device)
             self.tau_prev = torch.zeros(6, dtype=torch.float32, device=self.device)
         
-        # Track steps
-        self.max_episode_steps = 200  # 20 seconds at 10 Hz control rate
+        # Track steps — always shape (num_envs,) for consistent tensor ops
+        self.max_episode_steps = 500  # 10 seconds at 50 Hz control rate
         self.episode_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
 
     def reset(self, seed=None, options=None):
@@ -130,10 +130,10 @@ class BipedAMPEnv(gym.Env):
         # Clip actions to joint limits
         actions = torch.clamp(actions, min=self.action_limits_low_tensor, max=self.action_limits_high_tensor)
         
-        # Step the dynamics simulation (50 substeps of 0.002s = 0.1s macro-step)
+        # Step the dynamics simulation (20 substeps of 0.001s = 0.02s macro-step)
         self.q, self.u, self.tau_prev = step_environment(
             self.q, self.u, actions, self.params,
-            dt_sim=0.002, dt_control=0.1,
+            dt_sim=0.001, dt_control=0.02,
             mtg_controller=self.mtg_controller,
             tau_prev=self.tau_prev,
             device=self.device
@@ -168,9 +168,8 @@ class BipedAMPEnv(gym.Env):
             
             reward = upright_reward + height_reward + 0.5 * forward_reward - control_penalty
             
-            terminated = (torch.abs(torso_angle) > 0.78) or (hip_height < 0.60)
-            # For num_envs=1, episode_steps has size (1,)
-            truncated = self.episode_steps[0] >= self.max_episode_steps
+            terminated = ((torch.abs(torso_angle) > 0.78) | (hip_height < 0.60)).unsqueeze(0)
+            truncated = (self.episode_steps >= self.max_episode_steps)
         
         obs_tensor = self._get_obs()
         

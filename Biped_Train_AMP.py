@@ -17,7 +17,6 @@ from skrl.envs.wrappers.torch import wrap_env
 from skrl.memories.torch import RandomMemory
 from skrl.agents.torch.amp import AMP, AMP_CFG
 from skrl.models.torch import Model, GaussianMixin, DeterministicMixin
-from skrl.trainers.torch import SequentialTrainer
 
 # Define device for agent/networks (GPU)
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -295,18 +294,123 @@ agent = AMP(
 # -----------------------------------------------------------------------------
 # 4. Training Loop
 # -----------------------------------------------------------------------------
-# Define trainer
-trainer = SequentialTrainer(
-    cfg={
-        "timesteps": 10,
-        "headless": True
-    },
-    env=env,
-    agents=agent
-)
+TOTAL_TIMESTEPS     = 30_000_000
+ROLLOUT_STEPS       = cfg.rollouts      # steps per env per post_interaction
+LOG_INTERVAL        = 10               # update intervals between console prints
+CHECKPOINT_INTERVAL = 100             # update intervals between checkpoints
+
+def _fmt(n):
+    """Human-readable integer: 1_234_567 -> '1.23M'"""
+    if n >= 1_000_000:
+        return f"{n/1_000_000:.2f}M"
+    if n >= 1_000:
+        return f"{n/1_000:.1f}K"
+    return str(n)
+
+def print_header():
+    print("\n" + "=" * 80)
+    print(f"  PPO-AMP Biped Training   |   device: {device}   |   envs: {env.num_envs:,}")
+    print(f"  Total timesteps: {_fmt(TOTAL_TIMESTEPS)}   |   Rollout: {ROLLOUT_STEPS} steps/env")
+    print("=" * 80)
+    print(f"  {'Step':>8}  {'Progress':40}  {'Reward':>8}  {'D-Loss':>8}  {'P-Loss':>8}  {'V-Loss':>8}")
+    print("-" * 80)
+
+def print_progress(timestep, total, reward, d_loss, p_loss, v_loss):
+    frac  = min(timestep / total, 1.0)
+    filled = int(40 * frac)
+    bar   = "#" * filled + "-" * (40 - filled)
+    def _f(v, fmt): return fmt.format(v) if v is not None else "       -"
+    print(
+        f"  {_fmt(timestep):>8}  [{bar}]  "
+        f"{_f(reward, '{:8.3f}')}  {_f(d_loss, '{:8.4f}')}  "
+        f"{_f(p_loss, '{:8.4f}')}  {_f(v_loss, '{:8.4f}')}",
+        flush=True
+    )
 
 if __name__ == '__main__':
-    # Run training
-    print("Starting training loop...")
-    trainer.train()
-    print("Training completed successfully!")
+    print_header()
+
+    # skrl AMP needs its internal rollout counter seeded; call pre_interaction once
+    # (post_interaction triggers the update when _rollout % rollouts == 0)
+    timestep = 0
+    update   = 0
+    last_reward = last_dloss = last_ploss = last_vloss = None
+
+    states, infos = env.reset()
+    # skrl uses keyword-only args — keep a `states` alias for the agent state input
+    agent_states = states  # for non-hierarchical agents, states == observations
+
+    while timestep < TOTAL_TIMESTEPS:
+        # ---- signal start of rollout to agent ----
+        agent.pre_interaction(timestep=timestep, timesteps=TOTAL_TIMESTEPS)
+
+        # ---- rollout collection ----
+        for _ in range(ROLLOUT_STEPS):
+            with torch.no_grad():
+                # act() signature: (observations, states, *, timestep, timesteps)
+                actions, agent_outputs = agent.act(
+                    states, agent_states,
+                    timestep=timestep, timesteps=TOTAL_TIMESTEPS
+                )
+
+            next_states, rewards, terminated, truncated, infos = env.step(actions)
+
+            # record_transition uses keyword-only args; states == observations for flat envs
+            agent.record_transition(
+                observations=states,
+                states=agent_states,
+                actions=actions,
+                rewards=rewards,
+                next_observations=next_states,
+                next_states=next_states,
+                terminated=terminated,
+                truncated=truncated,
+                infos=infos,
+                timestep=timestep,
+                timesteps=TOTAL_TIMESTEPS
+            )
+
+            # ---- auto-reset terminated / truncated environments ----
+            done = terminated | truncated
+            if done.any():
+                reset_obs, _ = env.reset()
+                # Only overwrite the done envs
+                next_states = next_states.clone()
+                next_states[done] = reset_obs[done]
+
+            states       = next_states
+            agent_states = next_states
+            timestep    += env.num_envs
+
+        # ---- policy update ----
+        agent.post_interaction(timestep=timestep, timesteps=TOTAL_TIMESTEPS)
+        update += 1
+
+        # ---- extract metrics (exact skrl key names from AMP.update) ----
+        tracking = getattr(agent, '_tracking_data', {})
+        def _last(key):
+            vals = tracking.get(key, [])
+            if vals:
+                v = vals[-1]
+                try: return float(v)
+                except: pass
+            return None
+        last_reward = _last("Reward / Total reward (mean)") or last_reward
+        last_dloss  = _last("Loss / Discriminator loss")    or last_dloss
+        last_ploss  = _last("Loss / Policy loss")           or last_ploss
+        last_vloss  = _last("Loss / Value loss")            or last_vloss
+
+        if update % LOG_INTERVAL == 0:
+            print_progress(timestep, TOTAL_TIMESTEPS, last_reward, last_dloss, last_ploss, last_vloss)
+
+        if update % CHECKPOINT_INTERVAL == 0:
+            ckpt_path = f"runs/biped_amp/checkpoints/agent_{timestep}.pt"
+            os.makedirs(os.path.dirname(ckpt_path), exist_ok=True)
+            agent.save(ckpt_path)
+            print(f"  [checkpoint] saved -> {ckpt_path}")
+
+    print("\n" + "=" * 80)
+    print("  Training complete!")
+    agent.save("runs/biped_amp/checkpoints/agent_final.pt")
+    print("  Final checkpoint saved: runs/biped_amp/checkpoints/agent_final.pt")
+    print("=" * 80)

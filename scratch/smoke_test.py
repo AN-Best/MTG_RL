@@ -94,6 +94,9 @@ agent = AMP(
     collect_reference_motions=collect_reference_motions,
 )
 
+# Initialize the agent
+agent.init()
+
 # ---------- training loop ----------
 print("\nRunning 2-update smoke test...")
 timestep = 0
@@ -119,7 +122,7 @@ while timestep < TOTAL:
             infos=infos, timestep=timestep, timesteps=TOTAL,
         )
 
-        done = terminated | truncated
+        done = (terminated | truncated).view(-1)
         if done.any():
             reset_obs, _ = env.reset()
             next_states = next_states.clone()

@@ -330,6 +330,9 @@ def print_progress(timestep, total, reward, d_loss, p_loss, v_loss):
 if __name__ == '__main__':
     print_header()
 
+    # Initialize the agent (registers tensors, sets up SummaryWriter and checkpoints dir)
+    agent.init()
+
     # skrl AMP needs its internal rollout counter seeded; call pre_interaction once
     # (post_interaction triggers the update when _rollout % rollouts == 0)
     timestep = 0
@@ -371,7 +374,7 @@ if __name__ == '__main__':
             )
 
             # ---- auto-reset terminated / truncated environments ----
-            done = terminated | truncated
+            done = (terminated | truncated).view(-1)
             if done.any():
                 reset_obs, _ = env.reset()
                 # Only overwrite the done envs

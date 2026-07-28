@@ -252,6 +252,8 @@ cfg.rollouts = 16
 cfg.learning_epochs = 4
 cfg.mini_batches = 2
 cfg.learning_rate = 5e-5
+cfg.task_reward_scale = 1.0
+cfg.style_reward_scale = 2.0
 cfg.state_preprocessor = None  # Disable built-in preprocessor for simplicity
 
 # Configure TensorBoard logging
@@ -290,6 +292,14 @@ agent = AMP(
     reply_buffer=reply_buffer,
     collect_reference_motions=collect_reference_motions
 )
+custom_tracking = {}
+original_write_tracking_data = agent.write_tracking_data
+def patched_write_tracking_data(timestep=None, timesteps=None):
+    for k, v in agent.tracking_data.items():
+        if v:
+            custom_tracking[k] = np.mean(v)
+    original_write_tracking_data(timestep=timestep, timesteps=timesteps)
+agent.write_tracking_data = patched_write_tracking_data
 
 # -----------------------------------------------------------------------------
 # 4. Training Loop
@@ -389,16 +399,14 @@ if __name__ == '__main__':
         agent.post_interaction(timestep=timestep, timesteps=TOTAL_TIMESTEPS)
         update += 1
 
-        # ---- extract metrics (exact skrl key names from AMP.update) ----
-        tracking = getattr(agent, '_tracking_data', {})
+        # ---- extract metrics from custom_tracking patched writer ----
         def _last(key):
-            vals = tracking.get(key, [])
-            if vals:
-                v = vals[-1]
+            v = custom_tracking.get(key)
+            if v is not None:
                 try: return float(v)
                 except: pass
             return None
-        last_reward = _last("Reward / Total reward (mean)") or last_reward
+        last_reward = _last("Reward / Total reward (mean)") or _last("Reward / Instantaneous reward (mean)") or last_reward
         last_dloss  = _last("Loss / Discriminator loss")    or last_dloss
         last_ploss  = _last("Loss / Policy loss")           or last_ploss
         last_vloss  = _last("Loss / Value loss")            or last_vloss

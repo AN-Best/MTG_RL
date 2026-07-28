@@ -69,7 +69,7 @@ fi
 # 4. Run Training
 # -----------------------------------------------------------------------------
 echo "Starting PPO-AMP training..."
-srun python Biped_Train_AMP.py
+srun python -u Biped_Train_AMP.py
 
 EXIT_CODE=$?
 echo "============================================================"

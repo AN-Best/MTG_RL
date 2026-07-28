@@ -148,13 +148,14 @@ class BipedAMPEnv(gym.Env):
             vel_x = self.u[:, 0]
             
             upright_reward = torch.exp(-2.0 * (torso_angle ** 2))
-            height_reward = torch.exp(-10.0 * ((hip_height - 0.90) ** 2))
+            height_reward = torch.exp(-3.0 * ((hip_height - 0.90) ** 2))
             forward_reward = vel_x
             control_penalty = 0.01 * torch.sum(actions ** 2, dim=-1)
             
             reward = upright_reward + height_reward + 0.5 * forward_reward - control_penalty
             
-            terminated = (torch.abs(torso_angle) > 0.78) | (hip_height < 0.60)
+            velocity_explosion = (torch.abs(vel_x) > 5.0) | (torch.max(torch.abs(self.u), dim=-1)[0] > 50.0)
+            terminated = (torch.abs(torso_angle) > 0.78) | (hip_height < 0.60) | velocity_explosion
             truncated = self.episode_steps >= self.max_episode_steps
         else:
             torso_angle = self.q[2]
@@ -162,13 +163,14 @@ class BipedAMPEnv(gym.Env):
             vel_x = self.u[0]
             
             upright_reward = torch.exp(-2.0 * (torso_angle ** 2))
-            height_reward = torch.exp(-10.0 * ((hip_height - 0.90) ** 2))
+            height_reward = torch.exp(-3.0 * ((hip_height - 0.90) ** 2))
             forward_reward = vel_x
             control_penalty = 0.01 * torch.sum(actions ** 2, dim=-1)
             
             reward = upright_reward + height_reward + 0.5 * forward_reward - control_penalty
             
-            terminated = ((torch.abs(torso_angle) > 0.78) | (hip_height < 0.60)).unsqueeze(0)
+            velocity_explosion = (torch.abs(vel_x) > 5.0) | (torch.max(torch.abs(self.u)) > 50.0)
+            terminated = ((torch.abs(torso_angle) > 0.78) | (hip_height < 0.60) | velocity_explosion).unsqueeze(0)
             truncated = (self.episode_steps >= self.max_episode_steps)
         
         obs_tensor = self._get_obs()

@@ -307,43 +307,66 @@ print("Compiling equations of motion to PyTorch functions... (This may take a mo
 M_torch_func = sm.lambdify((q_vars, u_vars, torque_vars, parameter_vars), M_flat, modules='torch')
 F_torch_func = sm.lambdify((q_vars, u_vars, torque_vars, parameter_vars), F_flat, modules='torch')
 
+# -----------------------------------------------------------------------------
+# JIT Compilation via Tracing (for massive GPU speedup on the cluster)
+# -----------------------------------------------------------------------------
+# Define compilation device (matches train/eval setup)
+comp_device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+# Disable JIT fusers to prevent memory leaks/overhead on massive algebraic graphs
+torch._C._jit_set_profiling_executor(False)
+torch._C._jit_set_profiling_mode(False)
+
+def _wrap_M_func(q, u, torques, params):
+    device = q[0].device
+    M_num = M_torch_func(q, u, torques, params)
+    M_num_tensors = [val if isinstance(val, torch.Tensor) else torch.tensor(float(val), dtype=torch.float32, device=device) for val in M_num]
+    M_num_expanded = torch.broadcast_tensors(*M_num_tensors)
+    return torch.stack(M_num_expanded, dim=0)
+
+def _wrap_F_func(q, u, torques, params):
+    device = q[0].device
+    F_num = F_torch_func(q, u, torques, params)
+    F_num_tensors = [val if isinstance(val, torch.Tensor) else torch.tensor(float(val), dtype=torch.float32, device=device) for val in F_num]
+    F_num_expanded = torch.broadcast_tensors(*F_num_tensors)
+    return torch.stack(F_num_expanded, dim=0)
+
+# JIT trace with dummy batch size of 64 on target device
+print(f"Tracing equations of motion with TorchScript JIT on {comp_device}...")
+dummy_q = [torch.zeros(64, device=comp_device) for _ in range(9)]
+dummy_u = [torch.zeros(64, device=comp_device) for _ in range(9)]
+dummy_t = [torch.zeros(64, device=comp_device) for _ in range(6)]
+dummy_p = [torch.zeros(64, device=comp_device) for _ in range(24)]
+
+M_torch_jit = torch.jit.trace(_wrap_M_func, (dummy_q, dummy_u, dummy_t, dummy_p))
+F_torch_jit = torch.jit.trace(_wrap_F_func, (dummy_q, dummy_u, dummy_t, dummy_p))
+
 def skeleton_dynamics(q_val, u_val, torques_val, params_val):
     """Computes the state derivative dx/dt = [dq/dt, du/dt] for the biped skeleton.
-    Evaluates equations of motion on CPU (to avoid massive CUDA launch latency),
-    then transfers stacked matrices to GPU to solve the linear system.
+    Evaluates JIT compiled equations and solves the linear system entirely on the active device (GPU).
     """
     device = q_val.device
     
-    # Move inputs to CPU for fast equation evaluation
-    q_cpu = q_val.to(device="cpu", dtype=torch.float32)
-    u_cpu = u_val.to(device="cpu", dtype=torch.float32)
-    torques_cpu = torques_val.to(device="cpu", dtype=torch.float32)
-    params_cpu = params_val.to(device="cpu", dtype=torch.float32)
+    # Early NaN check to prevent calling torch.linalg.solve and crashing
+    if torch.isnan(q_val).any().item() or torch.isnan(u_val).any().item() or torch.isnan(torques_val).any().item():
+        if q_val.ndim > 1:
+            nan_q = torch.full((q_val.shape[0], 9), float('nan'), device=device)
+            nan_u = torch.full((q_val.shape[0], 9), float('nan'), device=device)
+        else:
+            nan_q = torch.full((9,), float('nan'), device=device)
+            nan_u = torch.full((9,), float('nan'), device=device)
+        return nan_q, nan_u
     
-    is_batched = q_cpu.ndim > 1
+    is_batched = q_val.ndim > 1
     
     if is_batched:
-        q_seq = [q_cpu[:, i] for i in range(9)]
-        u_seq = [u_cpu[:, i] for i in range(9)]
-        torques_seq = [torques_cpu[:, i] for i in range(6)]
-        params_seq = [params_cpu[:, i] for i in range(24)]
+        q_seq = [q_val[:, i] for i in range(9)]
+        u_seq = [u_val[:, i] for i in range(9)]
+        torques_seq = [torques_val[:, i] for i in range(6)]
+        params_seq = [params_val[:, i] for i in range(24)]
         
-        M_num = M_torch_func(q_seq, u_seq, torques_seq, params_seq)
-        F_num = F_torch_func(q_seq, u_seq, torques_seq, params_seq)
-        
-        # Fast CPU broadcast
-        M_num_tensors = [val if isinstance(val, torch.Tensor) else torch.tensor(val, device="cpu") for val in M_num]
-        F_num_tensors = [val if isinstance(val, torch.Tensor) else torch.tensor(val, device="cpu") for val in F_num]
-        
-        M_num_expanded = torch.broadcast_tensors(*M_num_tensors)
-        F_num_expanded = torch.broadcast_tensors(*F_num_tensors)
-        
-        M_mat_cpu = torch.stack(M_num_expanded, dim=0).view(18, 18, -1).permute(2, 0, 1)
-        F_mat_cpu = torch.stack(F_num_expanded, dim=0).t().unsqueeze(-1)
-        
-        # Copy to GPU in a single batch transfer
-        M_mat = M_mat_cpu.to(device)
-        F_mat = F_mat_cpu.to(device)
+        M_mat = M_torch_jit(q_seq, u_seq, torques_seq, params_seq).view(18, 18, -1).permute(2, 0, 1)
+        F_mat = F_torch_jit(q_seq, u_seq, torques_seq, params_seq).t().unsqueeze(-1)
         
         # Solve in double precision to prevent float32 ill-conditioning
         M_mat_double = M_mat.double()
@@ -351,23 +374,13 @@ def skeleton_dynamics(q_val, u_val, torques_val, params_val):
         eye = torch.eye(18, device=device, dtype=torch.float64)
         dx_dt = torch.linalg.solve(M_mat_double + 1e-6 * eye, F_mat_double).float().squeeze(-1)
     else:
-        q_list = list(q_cpu)
-        u_list = list(u_cpu)
-        torques_list = list(torques_cpu)
-        params_list = list(params_cpu)
+        q_list = list(q_val)
+        u_list = list(u_val)
+        torques_list = list(torques_val)
+        params_list = list(params_val)
         
-        M_num = M_torch_func(q_list, u_list, torques_list, params_list)
-        F_num = F_torch_func(q_list, u_list, torques_list, params_list)
-        
-        M_num_tensor = [torch.tensor(val, dtype=torch.float32, device="cpu") if not isinstance(val, torch.Tensor) else val for val in M_num]
-        F_num_tensor = [torch.tensor(val, dtype=torch.float32, device="cpu") if not isinstance(val, torch.Tensor) else val for val in F_num]
-        
-        M_mat_cpu = torch.stack(M_num_tensor, dim=0).view(18, 18)
-        F_mat_cpu = torch.stack(F_num_tensor, dim=0).unsqueeze(-1)
-        
-        # Copy to GPU
-        M_mat = M_mat_cpu.to(device)
-        F_mat = F_mat_cpu.to(device)
+        M_mat = M_torch_jit(q_list, u_list, torques_list, params_list).view(18, 18)
+        F_mat = F_torch_jit(q_list, u_list, torques_list, params_list).unsqueeze(-1)
         
         # Solve in double precision to prevent float32 ill-conditioning
         M_mat_double = M_mat.double()
@@ -385,4 +398,4 @@ def skeleton_dynamics(q_val, u_val, torques_val, params_val):
     return dx_dt[..., :9], dx_dt[..., 9:]
 
 print("Equations of motion successfully compiled!")
-print("skeleton_dynamics is ready to use with PyTorch.")
+print("skeleton_dynamics is ready to use with PyTorch JIT.")

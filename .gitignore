@@ -1,0 +1,21 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# PyTorch Checkpoints & TensorBoard Logs
+runs/
+checkpoints/
+*.pt
+*.pth
+
+# Output Media & Visualizations
+*.gif
+*.png
+*.mp4
+
+# Environment & IDE
+.vscode/
+.idea/
+*.log
+scratch/

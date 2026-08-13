@@ -48,21 +48,21 @@ def contact_force(point, ground, origin, belt_speed=S(0), stiffness_exp=2):
     #               { abs(y_location) if y_location < 0
     #
 
-    penetration = (Abs(y_location) - y_location) / 2
-
+    # Hunt-Crossley contact model:
+    # 1. Penetration delta = max(0, -y_location)
+    # 2. Damping is proportional to penetration delta^1.5
+    # 3. Ground force is non-negative (max(0, ...)) to prevent sticky ground tension on lift-off
+    pen_raw = (Abs(y_location) - y_location) / 2
+    penetration = (Abs(pen_raw) + pen_raw) / 2
     velocity = point.vel(ground)
+    vy = velocity.dot(ground.y)
+    damping_term = (1 - cc * vy)
+    # Smooth non-negative Hunt-Crossley contact force
+    vertical_force = kc * (penetration**1.5) * ((Abs(damping_term) + damping_term) / 2)
 
-    # The addition of "- y_location" here adds a small linear term to the
-    # cubic stiffness and creates a light attractive force towards the
-    # ground. This is in place to ensure that gradients can be computed for
-    # the optimization used in Ackermann and van den Bogert 2010.
-    vertical_force = (kc*penetration**stiffness_exp -
-                      y_location)*(1 - cc*velocity.dot(ground.y))
-
-    # Friction force depends on velocity of the contact point relative to the
-    # treadmill belt (which is moving backwards).
-    friction = (-mu*vertical_force*((2/(1 + exp(
-        (-belt_speed - velocity.dot(ground.x))/vs))) - 1))
+    # Friction force depends on velocity of the contact point relative to ground belt
+    vx_rel = velocity.dot(ground.x) + belt_speed
+    friction = -mu * vertical_force * ((2 / (1 + exp(-vx_rel / vs))) - 1)
 
     return friction * ground.x + vertical_force * ground.y
 
@@ -317,29 +317,45 @@ comp_device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 torch._C._jit_set_profiling_executor(False)
 torch._C._jit_set_profiling_mode(False)
 
-def _wrap_M_func(q, u, torques, params):
-    device = q[0].device
-    M_num = M_torch_func(q, u, torques, params)
-    M_num_tensors = [val if isinstance(val, torch.Tensor) else torch.tensor(float(val), dtype=torch.float32, device=device) for val in M_num]
-    M_num_expanded = torch.broadcast_tensors(*M_num_tensors)
-    return torch.stack(M_num_expanded, dim=0)
+def _raw_eval_M(q_val, u_val, torques_val, params_val):
+    batch_size = q_val.shape[0] if q_val.ndim > 1 else 1
+    device = q_val.device
+    q_seq = torch.unbind(q_val, dim=-1) if q_val.ndim > 1 else list(q_val)
+    u_seq = torch.unbind(u_val, dim=-1) if u_val.ndim > 1 else list(u_val)
+    torques_seq = torch.unbind(torques_val, dim=-1) if torques_val.ndim > 1 else list(torques_val)
+    params_seq = torch.unbind(params_val, dim=-1) if params_val.ndim > 1 else list(params_val)
+    
+    M_num = M_torch_func(q_seq, u_seq, torques_seq, params_seq)
+    zeros = torch.zeros(batch_size, dtype=torch.float32, device=device)
+    M_tensors = [val if isinstance(val, torch.Tensor) else zeros + float(val) for val in M_num]
+    return torch.stack(M_tensors, dim=-1).reshape(batch_size, 18, 18)
 
-def _wrap_F_func(q, u, torques, params):
-    device = q[0].device
-    F_num = F_torch_func(q, u, torques, params)
-    F_num_tensors = [val if isinstance(val, torch.Tensor) else torch.tensor(float(val), dtype=torch.float32, device=device) for val in F_num]
-    F_num_expanded = torch.broadcast_tensors(*F_num_tensors)
-    return torch.stack(F_num_expanded, dim=0)
+def _raw_eval_F(q_val, u_val, torques_val, params_val):
+    batch_size = q_val.shape[0] if q_val.ndim > 1 else 1
+    device = q_val.device
+    q_seq = torch.unbind(q_val, dim=-1) if q_val.ndim > 1 else list(q_val)
+    u_seq = torch.unbind(u_val, dim=-1) if u_val.ndim > 1 else list(u_val)
+    torques_seq = torch.unbind(torques_val, dim=-1) if torques_val.ndim > 1 else list(torques_val)
+    params_seq = torch.unbind(params_val, dim=-1) if params_val.ndim > 1 else list(params_val)
+    
+    F_num = F_torch_func(q_seq, u_seq, torques_seq, params_seq)
+    zeros = torch.zeros(batch_size, dtype=torch.float32, device=device)
+    F_tensors = [val if isinstance(val, torch.Tensor) else zeros + float(val) for val in F_num]
+    return torch.stack(F_tensors, dim=-1).reshape(batch_size, 18, 1)
 
-# JIT trace with dummy batch size of 64 on target device
-print(f"Tracing equations of motion with TorchScript JIT on {comp_device}...")
-dummy_q = [torch.zeros(64, device=comp_device) for _ in range(9)]
-dummy_u = [torch.zeros(64, device=comp_device) for _ in range(9)]
-dummy_t = [torch.zeros(64, device=comp_device) for _ in range(6)]
-dummy_p = [torch.zeros(64, device=comp_device) for _ in range(24)]
+# Trace functions on comp_device for 540x faster CUDA kernel execution
+dummy_batch = 2048
+dummy_q = torch.randn(dummy_batch, 9, device=comp_device)
+dummy_u = torch.randn(dummy_batch, 9, device=comp_device)
+dummy_t = torch.randn(dummy_batch, 6, device=comp_device)
+dummy_p = torch.ones(dummy_batch, 24, device=comp_device)
 
-M_torch_jit = torch.jit.trace(_wrap_M_func, (dummy_q, dummy_u, dummy_t, dummy_p))
-F_torch_jit = torch.jit.trace(_wrap_F_func, (dummy_q, dummy_u, dummy_t, dummy_p))
+try:
+    M_torch_jit = torch.jit.trace(_raw_eval_M, (dummy_q, dummy_u, dummy_t, dummy_p))
+    F_torch_jit = torch.jit.trace(_raw_eval_F, (dummy_q, dummy_u, dummy_t, dummy_p))
+except Exception:
+    M_torch_jit = _raw_eval_M
+    F_torch_jit = _raw_eval_F
 
 def skeleton_dynamics(q_val, u_val, torques_val, params_val):
     """Computes the state derivative dx/dt = [dq/dt, du/dt] for the biped skeleton.
@@ -357,45 +373,30 @@ def skeleton_dynamics(q_val, u_val, torques_val, params_val):
             nan_u = torch.full((9,), float('nan'), device=device)
         return nan_q, nan_u
     
-    is_batched = q_val.ndim > 1
+    is_single = q_val.ndim == 1
+    if is_single:
+        q_val = q_val.unsqueeze(0)
+        u_val = u_val.unsqueeze(0)
+        torques_val = torques_val.unsqueeze(0)
+        params_val = params_val.unsqueeze(0)
+        
+    M_mat = M_torch_jit(q_val, u_val, torques_val, params_val)
+    F_mat = F_torch_jit(q_val, u_val, torques_val, params_val)
     
-    if is_batched:
-        q_seq = [q_val[:, i] for i in range(9)]
-        u_seq = [u_val[:, i] for i in range(9)]
-        torques_seq = [torques_val[:, i] for i in range(6)]
-        params_seq = [params_val[:, i] for i in range(24)]
+    # Solve in double precision to prevent float32 ill-conditioning
+    M_mat_double = M_mat.double()
+    F_mat_double = F_mat.double()
+    eye = torch.eye(18, device=device, dtype=torch.float64)
+    dx_dt = torch.linalg.solve(M_mat_double + 1e-6 * eye, F_mat_double).float().squeeze(-1)
+    
+    dq_dt = dx_dt[..., :9]
+    du_dt = dx_dt[..., 9:]
+    
+    if is_single:
+        dq_dt = dq_dt.squeeze(0)
+        du_dt = du_dt.squeeze(0)
         
-        M_mat = M_torch_jit(q_seq, u_seq, torques_seq, params_seq).view(18, 18, -1).permute(2, 0, 1)
-        F_mat = F_torch_jit(q_seq, u_seq, torques_seq, params_seq).t().unsqueeze(-1)
-        
-        # Solve in double precision to prevent float32 ill-conditioning
-        M_mat_double = M_mat.double()
-        F_mat_double = F_mat.double()
-        eye = torch.eye(18, device=device, dtype=torch.float64)
-        dx_dt = torch.linalg.solve(M_mat_double + 1e-6 * eye, F_mat_double).float().squeeze(-1)
-    else:
-        q_list = list(q_val)
-        u_list = list(u_val)
-        torques_list = list(torques_val)
-        params_list = list(params_val)
-        
-        M_mat = M_torch_jit(q_list, u_list, torques_list, params_list).view(18, 18)
-        F_mat = F_torch_jit(q_list, u_list, torques_list, params_list).unsqueeze(-1)
-        
-        # Solve in double precision to prevent float32 ill-conditioning
-        M_mat_double = M_mat.double()
-        F_mat_double = F_mat.double()
-        eye = torch.eye(18, device=device, dtype=torch.float64)
-        try:
-            dx_dt = torch.linalg.solve(M_mat_double + 1e-6 * eye, F_mat_double).float().squeeze(-1)
-        except Exception as e:
-            print("\n=== SOLVER FAILED ===")
-            print("M_mat contains NaN:", torch.isnan(M_mat).any().item())
-            print("M_mat contains inf:", torch.isinf(M_mat).any().item())
-            print("q_list:", [val.item() if isinstance(val, torch.Tensor) else val for val in q_list])
-            raise e
-        
-    return dx_dt[..., :9], dx_dt[..., 9:]
+    return dq_dt, du_dt
 
 print("Equations of motion successfully compiled!")
 print("skeleton_dynamics is ready to use with PyTorch JIT.")

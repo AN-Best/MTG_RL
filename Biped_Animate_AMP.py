@@ -8,6 +8,7 @@ import matplotlib.animation as animation
 from Biped_Gym_Env import BipedAMPEnv
 from skrl.envs.wrappers.torch import wrap_env
 from Biped_Train_AMP import Policy
+from skrl.resources.preprocessors.torch import RunningStandardScaler
 
 # Define device
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -18,6 +19,13 @@ print("Initializing environment...")
 env = BipedAMPEnv(num_envs=1, device=device)
 env = wrap_env(env)
 
+# Initialize state preprocessor
+state_preprocessor = RunningStandardScaler(size=env.observation_space, device=device)
+
+# Set reference motion to allow Reference State Initialization (RSI) in evaluation
+from Biped_Train_AMP import q_ref_data, u_ref_data
+env.unwrapped.set_reference_motion(q_ref_data, u_ref_data)
+
 # Initialize policy
 print("Loading trained policy...")
 policy = Policy(env.observation_space, env.action_space, device)
@@ -25,33 +33,52 @@ policy.to(device)
 
 # Load the saved state dict from agent checkpoint
 try:
-    checkpoint = torch.load("amp_biped_policy.pt", map_location=device)
-    if isinstance(checkpoint, dict) and "policy" in checkpoint:
-        policy.load_state_dict(checkpoint["policy"])
-    else:
-        policy.load_state_dict(checkpoint)
-    print("Successfully loaded trained policy from amp_biped_policy.pt!")
-except Exception as e:
-    print(f"Could not load amp_biped_policy.pt directly: {e}")
-    print("Attempting to load from checkpoints folder...")
-    
-    checkpoint_path = "runs/biped_amp/checkpoints/best_agent.pt"
+    checkpoint_path = os.environ.get('ANIMATE_CHECKPOINT', 'runs_server/runs/biped_amp/checkpoints/agent_final.pt')
     if not os.path.exists(checkpoint_path):
-        pts = glob.glob("runs/biped_amp/checkpoints/*.pt")
+        checkpoint_path = 'runs_server/runs/biped_amp/checkpoints/best_agent.pt'
+        
+    if not os.path.exists(checkpoint_path):
+        pts = glob.glob("runs_server/runs/biped_amp/checkpoints/*.pt")
         if pts:
-            checkpoint_path = max(pts, key=os.path.getmtime)
-            print(f"best_agent.pt not found. Falling back to the latest checkpoint: {checkpoint_path}")
+            # Sort server checkpoints by step number (extracted from filename like agent_XXXXXXXX.pt)
+            pts_numeric = []
+            for p in pts:
+                base = os.path.basename(p)
+                if base.startswith("agent_") and base.endswith(".pt"):
+                    try:
+                        step_num = int(base.split("_")[1].split(".")[0])
+                        pts_numeric.append((step_num, p))
+                    except:
+                        pass
+            if pts_numeric:
+                checkpoint_path = sorted(pts_numeric)[-1][1]
+            else:
+                checkpoint_path = max(pts, key=os.path.getmtime)
+            print(f"Default final/best agent not found. Falling back to the latest server checkpoint: {checkpoint_path}")
         else:
-            raise FileNotFoundError("No checkpoint files found in runs/biped_amp/checkpoints/")
-            
+            # Fallback to local checkpoints folder if server folder is empty
+            pts_local = glob.glob("runs/biped_amp/checkpoints/*.pt")
+            if pts_local:
+                checkpoint_path = max(pts_local, key=os.path.getmtime)
+                print(f"No server checkpoints found. Falling back to local checkpoint: {checkpoint_path}")
+            else:
+                checkpoint_path = "amp_biped_policy.pt"
+                
+    print(f"Loading checkpoint from: {checkpoint_path}")
     checkpoint = torch.load(checkpoint_path, map_location=device)
     if isinstance(checkpoint, dict) and "policy" in checkpoint:
         policy.load_state_dict(checkpoint["policy"])
+        if "state_preprocessor" in checkpoint:
+            state_preprocessor.load_state_dict(checkpoint["state_preprocessor"])
+            print("Successfully loaded state preprocessor running stats!")
     else:
         policy.load_state_dict(checkpoint)
     print(f"Successfully loaded trained policy from {checkpoint_path}!")
+except Exception as e:
+    print(f"Could not load checkpoint: {e}")
 
 policy.eval()
+state_preprocessor.eval()
 
 # Reset environment and run rollout to record trajectory
 print("\n--- Running evaluation rollout to record positions ---")
@@ -61,7 +88,9 @@ q_history.append(env.unwrapped.q[0].cpu().numpy().copy() if env.unwrapped.q.ndim
 
 for step in range(200):  # Record 200 control cycles (20 seconds)
     with torch.no_grad():
-        inputs = {"states": obs}
+        # Normalize observations before acting
+        normalized_obs = state_preprocessor(obs)
+        inputs = {"states": normalized_obs}
         actions, _ = policy.act(inputs, role="policy")
         
     obs, reward, terminated, truncated, info = env.step(actions)
@@ -69,6 +98,16 @@ for step in range(200):  # Record 200 control cycles (20 seconds)
     
     if terminated[0] or truncated[0]:
         print(f"Rollout ended at step {step} due to termination/truncation.")
+        # Print details of why it terminated
+        torso_angle = env.unwrapped.q[2].item()
+        hip_height = env.unwrapped.q[1].item()
+        vel_x = env.unwrapped.u[0].item()
+        max_joint_vel = torch.max(torch.abs(env.unwrapped.u[3:9])).item()
+        print("\n=== Termination Diagnostics ===")
+        print(f"Hip Height: {hip_height:.4f} (limits: < 0.60)")
+        print(f"Torso Angle (Tilt): {torso_angle:.4f} rad / {torso_angle * 180.0 / 3.14159:.1f} deg (limits: > 0.78 rad / 45 deg)")
+        print(f"Pelvis Horiz Velocity (Vel X): {vel_x:.4f} m/s (limits: > 5.0 m/s)")
+        print(f"Max Joint Velocity: {max_joint_vel:.4f} rad/s (limits: > 50.0 rad/s)")
         break
 
 q_history = np.array(q_history)

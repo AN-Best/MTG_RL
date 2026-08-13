@@ -8,10 +8,9 @@ class MuscleTorqueGenerator:
     def __init__(self, device="cpu"):
         self.device = torch.device(device)
         
-        # Peak isometric torque T0 (Nm) - [Hip, Knee, Ankle]
-        # Positive direction (Flexion, Extension, Dorsiflexion)
+        # Peak isometric torque T0 (Nm) - [Hip, Knee, Ankle] (Exact Nasr & McPhee paper values)
         self.T0_pos = torch.tensor([150.0, 180.0, 80.0], dtype=torch.float32, device=self.device)
-        # Negative direction (Extension, Flexion, Plantar Flexion)
+        # Negative direction (Hip Extension, Knee Flexion, Ankle Plantar Flexion)
         self.T0_neg = torch.tensor([200.0, 120.0, 60.0], dtype=torch.float32, device=self.device)
         
         # Polynomial coefficients for Torque-Angle scaling
@@ -29,15 +28,29 @@ class MuscleTorqueGenerator:
         self.v_max_pos = torch.tensor([12.00, 28.40, 12.70], dtype=torch.float32, device=self.device)
         self.v_max_neg = torch.tensor([14.10, 18.60, 12.60], dtype=torch.float32, device=self.device)
         
-        # PD Gains (Kp, Kd) for Hip, Knee, Ankle
-        self.Kp = torch.tensor([250.0, 200.0, 80.0], dtype=torch.float32, device=self.device)
-        self.Kd = torch.tensor([25.0, 20.0, 8.0], dtype=torch.float32, device=self.device)
+        # PD Gains (Kp, Kd) for Hip, Knee, Ankle (Tuned for precise tracking and foot clearance)
+        self.Kp = torch.tensor([400.0, 400.0, 300.0], dtype=torch.float32, device=self.device)
+        self.Kd = torch.tensor([40.0, 35.0, 25.0], dtype=torch.float32, device=self.device)
         
         # Hyperbolic scaling factors
         self.Gamma = 3.0
         self.S = 2.0
         self.R = 1.4
         self.tau_act = 0.02 # activation/deactivation time constant (20 ms)
+
+        # Pre-allocated joint limits & passive damping tensors
+        hip_lim = torch.tensor([-0.5, 1.5], dtype=torch.float32, device=self.device)
+        knee_lim = torch.tensor([-2.0, 0.0], dtype=torch.float32, device=self.device)
+        ankle_lim = torch.tensor([-0.5, 0.5], dtype=torch.float32, device=self.device)
+        
+        self.min_lim = torch.cat([hip_lim[0:1], knee_lim[0:1], ankle_lim[0:1]] * 2, dim=-1)
+        self.max_lim = torch.cat([hip_lim[1:2], knee_lim[1:2], ankle_lim[1:2]] * 2, dim=-1)
+        
+        b_d = torch.tensor([2.0, 2.0, 1.0], dtype=torch.float32, device=self.device)
+        self.b_damping = torch.cat([b_d, b_d], dim=-1)
+        
+        self.Kp_batched = torch.cat([self.Kp, self.Kp], dim=-1)
+        self.Kd_batched = torch.cat([self.Kd, self.Kd], dim=-1)
 
     def get_tv_scaling(self, w_dir, w_max):
         # Double-hyperbolic scaling function (Equation 8)
@@ -80,31 +93,22 @@ class MuscleTorqueGenerator:
         return T_max_pos, T_max_neg
 
     def get_passive_torques(self, q_joints, u_joints):
-        # Anatomical limits
-        hip_lim = torch.tensor([-0.5, 1.5], dtype=torch.float32, device=self.device)
-        knee_lim = torch.tensor([-2.0, 0.0], dtype=torch.float32, device=self.device)
-        ankle_lim = torch.tensor([-0.5, 0.5], dtype=torch.float32, device=self.device)
+        # Quadratic spring stiffness to prevent Inf/NaN explosions
+        k_stiffness = 500.0
+        k_quadratic = 15.0
         
-        min_lim = torch.cat([hip_lim[0:1], knee_lim[0:1], ankle_lim[0:1]] * 2, dim=-1)
-        max_lim = torch.cat([hip_lim[1:2], knee_lim[1:2], ankle_lim[1:2]] * 2, dim=-1)
+        # Calculate penetration beyond limits using pre-allocated tensors
+        delta_min = torch.clamp(self.min_lim - q_joints, min=0.0)
+        delta_max = torch.clamp(q_joints - self.max_lim, min=0.0)
         
-        k_stiffness = 200.0
-        k_exponent = 20.0
-        
-        b_damping = torch.tensor([2.0, 2.0, 1.0], dtype=torch.float32, device=self.device)
-        b_damping = torch.cat([b_damping, b_damping], dim=-1)
-        
-        passive_stiffness = k_stiffness * torch.exp(-k_exponent * (q_joints - min_lim)) - \
-                             k_stiffness * torch.exp(k_exponent * (q_joints - max_lim))
-        passive_damping = -b_damping * u_joints
+        passive_stiffness = k_stiffness * (delta_min + k_quadratic * delta_min**2) - \
+                            k_stiffness * (delta_max + k_quadratic * delta_max**2)
+        passive_damping = -self.b_damping * u_joints
         return passive_stiffness + passive_damping
 
     def compute_torques(self, q_joints, u_joints, q_ref, tau_prev, dt_sim):
-        Kp = torch.cat([self.Kp, self.Kp], dim=-1)
-        Kd = torch.cat([self.Kd, self.Kd], dim=-1)
-        
         # Desired PD activation command
-        tau_des = Kp * (q_ref - q_joints) - Kd * u_joints
+        tau_des = self.Kp_batched * (q_ref - q_joints) - self.Kd_batched * u_joints
         T_max_pos, T_max_neg = self.get_limits(q_joints, u_joints)
         
         # 1. Back-calculate previous activation levels a_prev
@@ -131,30 +135,15 @@ class MuscleTorqueGenerator:
         
         return tau_active, tau_active + tau_passive
 
-def rk4_step(q, u, torques_func, params, dt):
-    def eval_dynamics(q_curr, u_curr):
-        tau_active, tau_j = torques_func(q_curr, u_curr)
-        dq, du = skeleton_dynamics(q_curr, u_curr, tau_j, params)
-        return dq, du, tau_active
-
-    dq1, du1, ta1 = eval_dynamics(q, u)
+def symplectic_euler_step(q, u, torques_func, params, dt):
+    tau_active, tau_j = torques_func(q, u)
+    dq, du = skeleton_dynamics(q, u, tau_j, params)
     
-    q2 = q + 0.5 * dt * dq1
-    u2 = u + 0.5 * dt * du1
-    dq2, du2, ta2 = eval_dynamics(q2, u2)
+    # Symplectic update: velocity first, then position using new velocity
+    u_next = u + dt * du
+    q_next = q + dt * u_next
     
-    q3 = q + 0.5 * dt * dq2
-    u3 = u + 0.5 * dt * du2
-    dq3, du3, ta3 = eval_dynamics(q3, u3)
-    
-    q4 = q + dt * dq3
-    u4 = u + dt * du3
-    dq4, du4, ta4 = eval_dynamics(q4, u4)
-    
-    q_next = q + (dt / 6.0) * (dq1 + 2.0 * dq2 + 2.0 * dq3 + dq4)
-    u_next = u + (dt / 6.0) * (du1 + 2.0 * du2 + 2.0 * du3 + du4)
-    tau_active_next = (ta1 + 2.0 * ta2 + 2.0 * ta3 + ta4) / 6.0
-    return q_next, u_next, tau_active_next
+    return q_next, u_next, tau_active
 
 def step_environment(q, u, q_ref, params, dt_sim=0.002, dt_control=0.1, mtg_controller=None, tau_prev=None, device="cpu"):
     """Integrates biped skeleton dynamics over control timestep using sub-stepping.
@@ -208,17 +197,29 @@ def step_environment(q, u, q_ref, params, dt_sim=0.002, dt_control=0.1, mtg_cont
             u_j = u_t[..., 3:9]
             return mtg_controller.compute_torques(q_j, u_j, q_ref, tau_curr, dt_sim)
             
-        q_curr, u_curr, tau_curr = rk4_step(q_curr, u_curr, get_torques, params, dt_sim)
+        q_curr, u_curr, tau_curr = symplectic_euler_step(q_curr, u_curr, get_torques, params, dt_sim)
         
-    # Inject NaN in q_curr[0] to let the environment step know
-    if q.ndim > 1:
-        if nan_occurred.any():
-            q_curr[nan_occurred, 0] = float('nan')
+    # Final check and recovery after the loop to clean any NaNs/Infs from the last substep
+    if q_curr.ndim > 1:
+        step_nan = torch.isnan(q_curr).any(dim=-1) | torch.isinf(q_curr).any(dim=-1) | \
+                   torch.isnan(u_curr).any(dim=-1) | torch.isinf(u_curr).any(dim=-1)
+        nan_occurred |= step_nan
+        if step_nan.any():
+            q_curr[step_nan] = 0.0
+            q_curr[step_nan, 1] = 0.90
+            u_curr[step_nan] = 0.0
+            tau_curr[step_nan] = 0.0
     else:
-        if nan_occurred:
-            q_curr[0] = float('nan')
+        step_nan = torch.isnan(q_curr).any() or torch.isinf(q_curr).any() or \
+                   torch.isnan(u_curr).any() or torch.isinf(u_curr).any()
+        if step_nan:
+            nan_occurred = True
+            q_curr = torch.zeros_like(q_curr)
+            q_curr[1] = 0.90
+            u_curr = torch.zeros_like(u_curr)
+            tau_curr = torch.zeros_like(tau_curr)
             
-    return q_curr, u_curr, tau_curr
+    return q_curr, u_curr, tau_curr, nan_occurred
 
 if __name__ == '__main__':
     # Simple test of the environment step

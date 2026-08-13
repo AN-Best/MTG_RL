@@ -6,7 +6,7 @@
 #SBATCH --time=23:59:00                   # 24h walltime limit
 #SBATCH --output=logs/biped_%j.out        # Stdout → logs/biped_<jobid>.out
 #SBATCH --error=logs/biped_%j.err         # Stderr → logs/biped_<jobid>.err
-#SBATCH --job-name=biped_amp              # Job name visible in squeue
+#SBATCH --job-name=biped_diffphys         # Job name visible in squeue
 
 # -----------------------------------------------------------------------------
 # 0. Setup
@@ -68,8 +68,8 @@ fi
 # -----------------------------------------------------------------------------
 # 4. Run Training
 # -----------------------------------------------------------------------------
-echo "Starting PPO-AMP training..."
-srun python -u Biped_Train_AMP.py
+echo "Starting Differentiable Physics training..."
+srun python -u Biped_Train_DiffPhys.py
 
 EXIT_CODE=$?
 echo "============================================================"

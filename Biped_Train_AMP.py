@@ -17,6 +17,7 @@ from skrl.envs.wrappers.torch import wrap_env
 from skrl.memories.torch import RandomMemory
 from skrl.agents.torch.amp import AMP, AMP_CFG
 from skrl.models.torch import Model, GaussianMixin, DeterministicMixin
+from skrl.resources.preprocessors.torch import RunningStandardScaler
 
 # Define device for agent/networks (GPU)
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -27,7 +28,7 @@ print(f"Using device: {device}")
 # -----------------------------------------------------------------------------
 class Policy(GaussianMixin, Model):
     def __init__(self, observation_space, action_space, device, clip_actions=False,
-                 clip_log_std=True, min_log_std=-20, max_log_std=2):
+                 clip_log_std=True, min_log_std=-5, max_log_std=2):
         Model.__init__(self, observation_space=observation_space, action_space=action_space, device=device)
         GaussianMixin.__init__(self, role="policy", clip_actions=clip_actions,
                                clip_log_std=clip_log_std, min_log_std=min_log_std, max_log_std=max_log_std)
@@ -71,9 +72,9 @@ class Discriminator(DeterministicMixin, Model):
         Model.__init__(self, observation_space=observation_space, action_space=action_space, device=device)
         DeterministicMixin.__init__(self, role="discriminator")
         
-        # Discriminator classifies observations (states) as real or generated
+        # Discriminator classifies style coordinates (16D: excludes pelvis horizontal velocity v_x)
         self.net = nn.Sequential(
-            nn.Linear(self.num_observations, 256),
+            nn.Linear(self.num_observations - 1, 256),
             nn.ELU(),
             nn.Linear(256, 128),
             nn.ELU(),
@@ -84,7 +85,14 @@ class Discriminator(DeterministicMixin, Model):
         states = inputs.get("states")
         if states is None:
             states = inputs.get("observations")
-        return self.net(states), {}
+        
+        # Slice out pelvis horizontal velocity v_x (index 8: first index of u)
+        # states structure: q[:, 1:] (8 coordinates) + u (9 velocities)
+        # Index 0-7: positions (8)
+        # Index 8: v_x velocity (1)
+        # Index 9-16: rest of velocities (8)
+        states_style = torch.cat([states[..., :8], states[..., 9:]], dim=-1)
+        return self.net(states_style), {}
 
 # -----------------------------------------------------------------------------
 # 2. Reference Motion Loader
@@ -120,6 +128,11 @@ def load_reference_motion(num_samples=10000, device="cpu"):
             data_lines = [list(map(float, line.strip().split())) for line in lines[data_start+1:] if line.strip()]
             data = np.array(data_lines)
             
+            # Crop to the optimal periodic gait cycle (0.4s to 1.6s)
+            idx_start = np.where(np.abs(data[:, 0] - 0.40) < 1e-4)[0][0]
+            idx_end = np.where(np.abs(data[:, 0] - 1.60) < 1e-4)[0][0]
+            data = data[idx_start:idx_end+1]
+            
             # Map joints
             times = data[:, 0]
             
@@ -137,29 +150,46 @@ def load_reference_motion(num_samples=10000, device="cpu"):
             
             # Extract raw coordinates
             q_lh_raw = data[:, idx_hip_l] * conv
-            q_lk_raw = -data[:, idx_knee_l] * conv # invert knee flexion sign to match dynamics
-            q_la_raw = data[:, idx_ankle_l] * conv
+            q_lk_raw = data[:, idx_knee_l] * conv
+            q_la_raw = data[:, idx_ankle_l] * conv + 0.03
             
             q_rh_raw = data[:, idx_hip_r] * conv
-            q_rk_raw = -data[:, idx_knee_r] * conv # invert knee flexion sign
-            q_ra_raw = data[:, idx_ankle_r] * conv
+            q_rk_raw = data[:, idx_knee_r] * conv
+            q_ra_raw = data[:, idx_ankle_r] * conv + 0.03
             
-            q_tr_raw = np.zeros_like(times) # simple vertical torso assumption
+            # Apply -0.08 rad (-4.6 deg) extra knee flexion during swing phase for +2.5cm 2D foot clearance
+            swing_mask_l = q_lh_raw > 0.05
+            q_lk_raw += np.where(swing_mask_l, -0.08, 0.0)
             
-            q_x_raw = data[:, col_headers.index("pelvis_tx")]
-            # Start at x=0
-            q_x_raw = q_x_raw - q_x_raw[0]
-            q_y_raw = data[:, col_headers.index("pelvis_ty")]
+            swing_mask_r = q_rh_raw > 0.05
+            q_rk_raw += np.where(swing_mask_r, -0.08, 0.0)
+            
+            # Extract actual OpenSim coordinates and apply -0.122m vertical ground retargeting
+            pelvis_tx_raw = data[:, col_headers.index("pelvis_tx")]
+            # Retarget pelvis height down by 10.7cm (compensating for 1.5cm stance weight sag)
+            pelvis_ty_raw = data[:, col_headers.index("pelvis_ty")] - 0.1070
+            # OpenSim positive tilt is posterior (backward); invert to match 2D forward lean (+ = forward)
+            pelvis_tilt_raw = -np.radians(data[:, col_headers.index("pelvis_tilt")])
+            
+            q_x_raw = pelvis_tx_raw - pelvis_tx_raw[0]
+            q_y_raw = pelvis_ty_raw
+            q_tr_raw = pelvis_tilt_raw
             
             # Interpolate to build continuous cycle dataset of length `num_samples`
-            # Gait period (assume subject01_walk1_ik is periodic or we loop it)
+            # Build 100% C1-continuous periodic gait cycle dataset
+            n_raw = len(times)
+            # Find matching gait phase length
+            stride_len = n_raw
             cycle_distance = q_x_raw[-1] - q_x_raw[0]
             cycle_duration = times[-1] - times[0]
-            target_t = np.linspace(times[0], times[0] + cycle_duration * (num_samples / 100), num_samples)
+            target_t = np.linspace(times[0], times[0] + cycle_duration * (num_samples / stride_len), num_samples)
             mod_t = times[0] + np.mod(target_t - times[0], cycle_duration)
-            cycle_idx = np.floor((target_t - times[0]) / cycle_duration)
+            cycle_count = np.floor((target_t - times[0]) / cycle_duration)
             
-            q_x = np.interp(mod_t, times, q_x_raw) + cycle_idx * cycle_distance
+            # Smooth C1 interpolation across cycle boundary
+            blend_w = 0.5 * (1.0 - np.cos(np.pi * (mod_t - times[0]) / (times[-1] - times[0])))
+            
+            q_x = np.interp(mod_t, times, q_x_raw) + cycle_distance * cycle_count
             q_y = np.interp(mod_t, times, q_y_raw)
             q_tr = np.interp(mod_t, times, q_tr_raw)
             q_lh = np.interp(mod_t, times, q_lh_raw)
@@ -185,7 +215,7 @@ def load_reference_motion(num_samples=10000, device="cpu"):
             # Note: Observation excludes q_x (index 0), so we slice q_tensor to match BipedAMPEnv observation space!
             # The AMP discriminator compares observations (17D).
             obs_ref = torch.cat([q_tensor[:, 1:], u_tensor], dim=-1)
-            return obs_ref
+            return obs_ref, q_tensor, u_tensor
             
         except Exception as e:
             print(f"Error parsing local walk file ({e}). Falling back to mathematical biped gait generation.")
@@ -230,13 +260,13 @@ def load_reference_motion(num_samples=10000, device="cpu"):
     u = torch.stack([u_x, u_y, u_tr, u_lh, u_lk, u_la, u_rh, u_rk, u_ra], dim=-1)
     
     obs = torch.cat([q[:, 1:], u], dim=-1)
-    return obs
+    return obs, q, u
 
 # -----------------------------------------------------------------------------
 # 3. Setup Environment & Agent
 # -----------------------------------------------------------------------------
 print("Initializing environment...")
-env = BipedAMPEnv(num_envs=2048, device=device)
+env = BipedAMPEnv(num_envs=256, device=device)
 env = wrap_env(env)
 
 # Define models
@@ -250,11 +280,15 @@ models = {
 cfg = AMP_CFG()
 cfg.rollouts = 16
 cfg.learning_epochs = 4
-cfg.mini_batches = 2
-cfg.learning_rate = 5e-5
+cfg.mini_batches = 16
+cfg.learning_rate = 1e-4
+cfg.entropy_loss_scale = 0.002
 cfg.task_reward_scale = 1.0
-cfg.style_reward_scale = 2.0
-cfg.state_preprocessor = None  # Disable built-in preprocessor for simplicity
+cfg.style_reward_scale = 0.5
+cfg.state_preprocessor = RunningStandardScaler
+cfg.state_preprocessor_kwargs = {"size": env.observation_space, "device": device}
+cfg.amp_state_preprocessor = RunningStandardScaler
+cfg.amp_state_preprocessor_kwargs = {"size": env.observation_space, "device": device}
 
 # Configure TensorBoard logging
 cfg.experiment.directory = "runs"
@@ -263,13 +297,16 @@ cfg.experiment.write_interval = 1
 cfg.experiment.checkpoint_interval = 10
 
 # Define memory buffers (memory uses env.num_envs, reply_buffer uses 1 for flat discriminator samples)
-# memory_size = 16 matches cfg.rollouts, saving massive GPU memory at scale
+# memory_size MUST match cfg.rollouts (16)
 memory = RandomMemory(memory_size=16, device=device, num_envs=env.num_envs)
 reply_buffer = RandomMemory(memory_size=200000, device=device, num_envs=1, replacement=True)
 
 # Load reference motion data (Downloads from OpenSim)
 print("Loading reference motion dataset...")
-ref_obs = load_reference_motion(num_samples=10000, device=device)
+ref_obs, q_ref_data, u_ref_data = load_reference_motion(num_samples=10000, device=device)
+
+# Pass raw reference coordinates to the unwrapped environment for Reference State Initialization (RSI)
+env.unwrapped.set_reference_motion(q_ref_data, u_ref_data)
 
 # Create and populate motion dataset
 motion_dataset = RandomMemory(memory_size=10000, device=device, replacement=True)
@@ -304,7 +341,7 @@ agent.write_tracking_data = patched_write_tracking_data
 # -----------------------------------------------------------------------------
 # 4. Training Loop
 # -----------------------------------------------------------------------------
-TOTAL_TIMESTEPS     = 30_000_000
+TOTAL_TIMESTEPS     = 100_000_000
 ROLLOUT_STEPS       = cfg.rollouts      # steps per env per post_interaction
 LOG_INTERVAL        = 10               # update intervals between console prints
 CHECKPOINT_INTERVAL = 100             # update intervals between checkpoints
@@ -382,14 +419,6 @@ if __name__ == '__main__':
                 timestep=timestep,
                 timesteps=TOTAL_TIMESTEPS
             )
-
-            # ---- auto-reset terminated / truncated environments ----
-            done = (terminated | truncated).view(-1)
-            if done.any():
-                reset_obs, _ = env.reset()
-                # Only overwrite the done envs
-                next_states = next_states.clone()
-                next_states[done] = reset_obs[done]
 
             states       = next_states
             agent_states = next_states

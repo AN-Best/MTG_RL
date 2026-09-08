@@ -1,6 +1,15 @@
-sympy
-numpy
-torch
-gymnasium
-skrl
-matplotlib
+# Core Physics & Mathematics
+sympy>=1.12
+numpy>=1.24.0
+scipy>=1.11.0
+
+# Deep Learning & Differentiable Physics
+torch>=2.0.0
+
+# Reinforcement Learning & Simulation
+gymnasium>=0.29.0
+skrl>=1.1.0
+
+# Visualization & Animation
+matplotlib>=3.7.0
+pillow>=9.5.0

@@ -27,8 +27,8 @@ print(f"Using device: {device}")
 # 1. Neural Network Model Definitions
 # -----------------------------------------------------------------------------
 class Policy(GaussianMixin, Model):
-    def __init__(self, observation_space, action_space, device, clip_actions=False,
-                 clip_log_std=True, min_log_std=-5, max_log_std=2):
+    def __init__(self, observation_space, action_space, device, clip_actions=True,
+                 clip_log_std=True, min_log_std=-3.0, max_log_std=-0.5):
         Model.__init__(self, observation_space=observation_space, action_space=action_space, device=device)
         GaussianMixin.__init__(self, role="policy", clip_actions=clip_actions,
                                clip_log_std=clip_log_std, min_log_std=min_log_std, max_log_std=max_log_std)
@@ -72,7 +72,7 @@ class Discriminator(DeterministicMixin, Model):
         Model.__init__(self, observation_space=observation_space, action_space=action_space, device=device)
         DeterministicMixin.__init__(self, role="discriminator")
         
-        # Discriminator classifies style coordinates (16D: excludes pelvis horizontal velocity v_x)
+        # Discriminator classifies style coordinates (18D: excludes pelvis horizontal velocity v_x)
         self.net = nn.Sequential(
             nn.Linear(self.num_observations - 1, 256),
             nn.ELU(),
@@ -86,19 +86,19 @@ class Discriminator(DeterministicMixin, Model):
         if states is None:
             states = inputs.get("observations")
         
-        # Slice out pelvis horizontal velocity v_x (index 8: first index of u)
-        # states structure: q[:, 1:] (8 coordinates) + u (9 velocities)
-        # Index 0-7: positions (8)
-        # Index 8: v_x velocity (1)
-        # Index 9-16: rest of velocities (8)
-        states_style = torch.cat([states[..., :8], states[..., 9:]], dim=-1)
+        # Slice out pelvis horizontal velocity v_x (index 9: first index of u)
+        # states structure: q[:, 1:] (9 coordinates) + u (10 velocities) -> 19 total
+        # Index 0-8: positions (9: q_y, q_p, q_lum, q_lh, q_lk, q_la, q_rh, q_rk, q_ra)
+        # Index 9: v_x velocity (1)
+        # Index 10-18: rest of velocities (9)
+        states_style = torch.cat([states[..., :9], states[..., 10:]], dim=-1)
         return self.net(states_style), {}
 
 # -----------------------------------------------------------------------------
 # 2. Reference Motion Loader
 # -----------------------------------------------------------------------------
 def load_reference_motion(num_samples=10000, device="cpu"):
-    """Loads OpenSim reference walking coordinates and interpolates to build
+    """Loads OpenSim reference walking coordinates with Pelvis and Lumbar joints and interpolates to build
     a continuous cycle dataset for adversarial motion prior training.
     """
     url = "https://raw.githubusercontent.com/opensim-org/opensim-models/master/Pipelines/Gait2392_Simbody/subject01_walk1_ik.mot"
@@ -113,11 +113,9 @@ def load_reference_motion(num_samples=10000, device="cpu"):
             
     if os.path.exists(local_path):
         try:
-            # Parse OpenSim .mot file
             with open(local_path, 'r') as f:
                 lines = f.readlines()
             
-            # Find header end
             data_start = 0
             for idx, line in enumerate(lines):
                 if line.strip() == "endheader":
@@ -133,52 +131,32 @@ def load_reference_motion(num_samples=10000, device="cpu"):
             idx_end = np.where(np.abs(data[:, 0] - 1.60) < 1e-4)[0][0]
             data = data[idx_start:idx_end+1]
             
-            # Map joints
             times = data[:, 0]
-            
-            # Indices for hip, knee, ankle flexion angles in subject01
-            idx_hip_l = col_headers.index("hip_flexion_l")
-            idx_knee_l = col_headers.index("knee_angle_l")
-            idx_ankle_l = col_headers.index("ankle_angle_l")
-            
-            idx_hip_r = col_headers.index("hip_flexion_r")
-            idx_knee_r = col_headers.index("knee_angle_r")
-            idx_ankle_r = col_headers.index("ankle_angle_r")
-            
-            # Convert degrees to radians
             conv = np.pi / 180.0
             
-            # Extract raw coordinates
-            q_lh_raw = data[:, idx_hip_l] * conv
-            q_lk_raw = data[:, idx_knee_l] * conv
-            q_la_raw = data[:, idx_ankle_l] * conv + 0.03
-            
-            q_rh_raw = data[:, idx_hip_r] * conv
-            q_rk_raw = data[:, idx_knee_r] * conv
-            q_ra_raw = data[:, idx_ankle_r] * conv + 0.03
-            
-            # Apply -0.08 rad (-4.6 deg) extra knee flexion during swing phase for +2.5cm 2D foot clearance
-            swing_mask_l = q_lh_raw > 0.05
-            q_lk_raw += np.where(swing_mask_l, -0.08, 0.0)
-            
-            swing_mask_r = q_rh_raw > 0.05
-            q_rk_raw += np.where(swing_mask_r, -0.08, 0.0)
-            
-            # Extract actual OpenSim coordinates and apply -0.122m vertical ground retargeting
+            # 10 Generalized coordinates from OpenSim subject01:
             pelvis_tx_raw = data[:, col_headers.index("pelvis_tx")]
-            # Retarget pelvis height down by 10.7cm (compensating for 1.5cm stance weight sag)
-            pelvis_ty_raw = data[:, col_headers.index("pelvis_ty")] - 0.1070
-            # OpenSim positive tilt is posterior (backward); invert to match 2D forward lean (+ = forward)
-            pelvis_tilt_raw = -np.radians(data[:, col_headers.index("pelvis_tilt")])
+            pelvis_ty_raw = data[:, col_headers.index("pelvis_ty")] - 0.1070 # Retarget pelvis height
+            pelvis_tilt_raw = data[:, col_headers.index("pelvis_tilt")] * conv
+            
+            # Retarget lumbar reference angle so world torso pitch theta_torso = q_p + q_lum has a natural +2.0 deg (+0.035 rad) forward lean
+            torso_des = 0.035 + 0.015 * np.cos(2.0 * np.pi * (times - times[0]) / (times[-1] - times[0]))
+            q_lum_raw = torso_des - pelvis_tilt_raw
+            
+            q_lh_raw = data[:, col_headers.index("hip_flexion_l")] * conv
+            q_lk_raw = data[:, col_headers.index("knee_angle_l")] * conv
+            q_la_raw = data[:, col_headers.index("ankle_angle_l")] * conv
+            
+            q_rh_raw = data[:, col_headers.index("hip_flexion_r")] * conv
+            q_rk_raw = data[:, col_headers.index("knee_angle_r")] * conv
+            q_ra_raw = data[:, col_headers.index("ankle_angle_r")] * conv
             
             q_x_raw = pelvis_tx_raw - pelvis_tx_raw[0]
             q_y_raw = pelvis_ty_raw
-            q_tr_raw = pelvis_tilt_raw
+            q_p_raw = pelvis_tilt_raw
             
-            # Interpolate to build continuous cycle dataset of length `num_samples`
-            # Build 100% C1-continuous periodic gait cycle dataset
+            # Interpolate to build continuous periodic gait cycle dataset
             n_raw = len(times)
-            # Find matching gait phase length
             stride_len = n_raw
             cycle_distance = q_x_raw[-1] - q_x_raw[0]
             cycle_duration = times[-1] - times[0]
@@ -186,12 +164,10 @@ def load_reference_motion(num_samples=10000, device="cpu"):
             mod_t = times[0] + np.mod(target_t - times[0], cycle_duration)
             cycle_count = np.floor((target_t - times[0]) / cycle_duration)
             
-            # Smooth C1 interpolation across cycle boundary
-            blend_w = 0.5 * (1.0 - np.cos(np.pi * (mod_t - times[0]) / (times[-1] - times[0])))
-            
             q_x = np.interp(mod_t, times, q_x_raw) + cycle_distance * cycle_count
             q_y = np.interp(mod_t, times, q_y_raw)
-            q_tr = np.interp(mod_t, times, q_tr_raw)
+            q_p = np.interp(mod_t, times, q_p_raw)
+            q_lum = np.interp(mod_t, times, q_lum_raw)
             q_lh = np.interp(mod_t, times, q_lh_raw)
             q_lk = np.interp(mod_t, times, q_lk_raw)
             q_la = np.interp(mod_t, times, q_la_raw)
@@ -199,7 +175,8 @@ def load_reference_motion(num_samples=10000, device="cpu"):
             q_rk = np.interp(mod_t, times, q_rk_raw)
             q_ra = np.interp(mod_t, times, q_ra_raw)
             
-            q = np.stack([q_x, q_y, q_tr, q_lh, q_lk, q_la, q_rh, q_rk, q_ra], axis=-1)
+            # 10 coordinates: [q_x, q_y, q_p, q_lum, q_lh, q_lk, q_la, q_rh, q_rk, q_ra]
+            q = np.stack([q_x, q_y, q_p, q_lum, q_lh, q_lk, q_la, q_rh, q_rk, q_ra], axis=-1)
             
             # Numerical velocities u = dq/dt
             dt = target_t[1] - target_t[0]
@@ -211,42 +188,38 @@ def load_reference_motion(num_samples=10000, device="cpu"):
             q_tensor = torch.tensor(q, dtype=torch.float32, device=device)
             u_tensor = torch.tensor(u, dtype=torch.float32, device=device)
             
-            print(f"Successfully loaded and parsed {len(q)} reference steps from {local_path}!")
-            # Note: Observation excludes q_x (index 0), so we slice q_tensor to match BipedAMPEnv observation space!
-            # The AMP discriminator compares observations (17D).
+            print(f"Successfully loaded and parsed {len(q)} reference steps with Pelvis & Lumbar joints from {local_path}!")
+            # 19D observation: 9 coordinates (excluding q_x) + 10 velocities
             obs_ref = torch.cat([q_tensor[:, 1:], u_tensor], dim=-1)
             return obs_ref, q_tensor, u_tensor
             
         except Exception as e:
             print(f"Error parsing local walk file ({e}). Falling back to mathematical biped gait generation.")
 
-    # FALLBACK GENERATOR: Periodic mathematical gait
+    # FALLBACK GENERATOR: Periodic mathematical gait (10-DoF)
     print("Generating fallback mathematical reference motion...")
     t = torch.linspace(0, num_samples * 0.1, num_samples, device=device)
     
-    # Translation
     q_x = 1.0 * t
     q_y = 0.90 + 0.03 * torch.cos(4.0 * torch.pi * t)
+    q_p = 0.084 + 0.02 * torch.sin(2.0 * torch.pi * t)
+    q_lum = -0.34 + 0.02 * torch.cos(2.0 * torch.pi * t)
     
-    # Left leg reference kinematics
     q_lh = 0.2 + 0.35 * torch.cos(2.0 * torch.pi * t - 0.5)
     q_lk = -0.55 + 0.55 * torch.cos(2.0 * torch.pi * t - 1.5) - 0.1 * torch.sin(4.0 * torch.pi * t)
     q_la = 0.02 + 0.08 * torch.sin(2.0 * torch.pi * t) + 0.05 * torch.cos(4.0 * torch.pi * t - 0.5)
     
-    # Right leg kinematics (50% phase shift)
     t_r = t + 0.5
     q_rh = 0.2 + 0.35 * torch.cos(2.0 * torch.pi * t_r - 0.5)
-    q_rk = -0.55 + 0.55 * torch.cos(2.0 * torch.pi * t_r - 1.5) - 0.1 * torch.sin(4.0 * torch.pi * t_r)
+    q_rk = -0.55 + 0.55 * torch.cos(2.0 * torch.pi * t_r - 1.5) - 0.4 * torch.sin(4.0 * torch.pi * t_r)
     q_ra = 0.02 + 0.08 * torch.sin(2.0 * torch.pi * t_r) + 0.05 * torch.cos(4.0 * torch.pi * t_r - 0.5)
     
-    # Torso: slightly oscillates around vertical
-    q_tr = 0.02 * torch.sin(2.0 * torch.pi * t)
+    q = torch.stack([q_x, q_y, q_p, q_lum, q_lh, q_lk, q_la, q_rh, q_rk, q_ra], dim=-1)
     
-    q = torch.stack([q_x, q_y, q_tr, q_lh, q_lk, q_la, q_rh, q_rk, q_ra], dim=-1)
-    
-    # Compute analytical velocities u = dq/dt
     u_x = torch.ones_like(t) * 1.0
     u_y = -0.12 * torch.pi * torch.sin(4.0 * torch.pi * t)
+    u_p = 0.02 * 2.0 * torch.pi * torch.cos(2.0 * torch.pi * t)
+    u_lum = -0.02 * 2.0 * torch.pi * torch.sin(2.0 * torch.pi * t)
     u_lh = -0.35 * 2.0 * torch.pi * torch.sin(2.0 * torch.pi * t - 0.5)
     u_lk = -0.55 * 2.0 * torch.pi * torch.sin(2.0 * torch.pi * t - 1.5) - 0.4 * torch.pi * torch.cos(4.0 * torch.pi * t)
     u_la = 0.08 * 2.0 * torch.pi * torch.cos(2.0 * torch.pi * t) - 0.2 * torch.pi * torch.sin(4.0 * torch.pi * t - 0.5)
@@ -255,9 +228,7 @@ def load_reference_motion(num_samples=10000, device="cpu"):
     u_rk = -0.55 * 2.0 * torch.pi * torch.sin(2.0 * torch.pi * t_r - 1.5) - 0.4 * torch.pi * torch.cos(4.0 * torch.pi * t_r)
     u_ra = 0.08 * 2.0 * torch.pi * torch.cos(2.0 * torch.pi * t_r) - 0.2 * torch.pi * torch.sin(4.0 * torch.pi * t_r - 0.5)
     
-    u_tr = 0.02 * 2.0 * torch.pi * torch.cos(2.0 * torch.pi * t)
-    
-    u = torch.stack([u_x, u_y, u_tr, u_lh, u_lk, u_la, u_rh, u_rk, u_ra], dim=-1)
+    u = torch.stack([u_x, u_y, u_p, u_lum, u_lh, u_lk, u_la, u_rh, u_rk, u_ra], dim=-1)
     
     obs = torch.cat([q[:, 1:], u], dim=-1)
     return obs, q, u
@@ -265,8 +236,9 @@ def load_reference_motion(num_samples=10000, device="cpu"):
 # -----------------------------------------------------------------------------
 # 3. Setup Environment & Agent
 # -----------------------------------------------------------------------------
-print("Initializing environment...")
-env = BipedAMPEnv(num_envs=256, device=device)
+num_envs = int(os.environ.get("NUM_ENVS", "1024" if torch.cuda.is_available() else "32"))
+print(f"Initializing environment with {num_envs:,} parallel instances on {device}...")
+env = BipedAMPEnv(num_envs=num_envs, device=device)
 env = wrap_env(env)
 
 # Define models
@@ -282,9 +254,10 @@ cfg.rollouts = 16
 cfg.learning_epochs = 4
 cfg.mini_batches = 16
 cfg.learning_rate = 1e-4
-cfg.entropy_loss_scale = 0.002
-cfg.task_reward_scale = 1.0
-cfg.style_reward_scale = 0.5
+cfg.grad_norm_clip = 1.0
+cfg.entropy_loss_scale = 0.001
+cfg.task_reward_scale = 0.5
+cfg.style_reward_scale = 1.0
 cfg.state_preprocessor = RunningStandardScaler
 cfg.state_preprocessor_kwargs = {"size": env.observation_space, "device": device}
 cfg.amp_state_preprocessor = RunningStandardScaler
@@ -341,7 +314,7 @@ agent.write_tracking_data = patched_write_tracking_data
 # -----------------------------------------------------------------------------
 # 4. Training Loop
 # -----------------------------------------------------------------------------
-TOTAL_TIMESTEPS     = 100_000_000
+TOTAL_TIMESTEPS     = 300_000_000
 ROLLOUT_STEPS       = cfg.rollouts      # steps per env per post_interaction
 LOG_INTERVAL        = 10               # update intervals between console prints
 CHECKPOINT_INTERVAL = 100             # update intervals between checkpoints

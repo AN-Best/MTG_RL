@@ -19,3 +19,12 @@ checkpoints/
 .idea/
 *.log
 scratch/
+scratch_ranges.py
+
+# Motion capture & retargeted motion datasets
+motions/
+*.npz
+*.mot
+*.trc
+*.bvh
+*.c3d

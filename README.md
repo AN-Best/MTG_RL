@@ -7,7 +7,7 @@ A **MuJoCo + PyTorch** reinforcement learning framework for a 10-Degree-of-Freed
 ## 📁 Repository Structure
 
 ```text
-MTG_SymPy/
+MTG_RL/
 ├── biped_10dof.xml                         # 10-DoF MuJoCo musculoskeletal biped model (500 Hz, dt = 0.002s)
 ├── biped_overlay.xml                       # Dual-biped overlay scene (Mode 1 Ghost vs Mode 2 Solid)
 ├── Biped_Actuators.py                      # Mode 1 (Unlimited PD) & Mode 2 (500 Hz Clamped MTG + Activation + Passive)

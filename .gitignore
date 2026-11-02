@@ -10,8 +10,6 @@ checkpoints/
 *.pth
 
 # Output Media & Visualizations
-*.gif
-*.png
 *.mp4
 
 # Environment & IDE

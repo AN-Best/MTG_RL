@@ -54,9 +54,11 @@ class BipedEnv:
         else:
             self.data.qvel[:] = 0.0
 
-        # Reset actuator internal muscle activation state (if MTG, nominal resting tone = 0.15)
-        if self.actuator_type in ["mtg", "muscle", "tier3"]:
-            self.actuator_state = torch.full((1, 7), 0.15, dtype=torch.float32, device=self.device)
+        # Reset actuator internal muscle activation state
+        if hasattr(self.actuator, "reset_state"):
+            self.actuator.reset_state()
+        if self.actuator_type in ["mtg", "muscle", "tier3", "muscle_space", "muscle_vae", "tier4"]:
+            self.actuator_state = torch.zeros((1, 2, 7), dtype=torch.float32, device=self.device)
         else:
             self.actuator_state = None
             
@@ -78,6 +80,17 @@ class BipedEnv:
             dt_sim: Timestep in seconds (default 0.002s)
             u_des: Target joint velocities array or tensor [7] (rad/s) or None
         """
+        if isinstance(q_des, np.ndarray) and hasattr(self.actuator, "compute_torques_np"):
+            q_j_np = self.data.qpos[3:10].astype(np.float32)
+            u_j_np = self.data.qvel[3:10].astype(np.float32)
+            if self.actuator.actuator_type == "mtg_clamped":
+                tau_np = self.actuator.compute_torques_np(q_j_np, u_j_np, q_des, u_des=u_des, dt_sim=dt_sim)
+            else:
+                tau_np = self.actuator.compute_torques_np(q_j_np, u_j_np, q_des, u_des=u_des)
+            self.data.ctrl[:] = tau_np
+            mujoco.mj_step(self.model, self.data)
+            return self._get_obs(), tau_np
+
         if isinstance(q_des, np.ndarray):
             q_des_t = torch.tensor(q_des, dtype=torch.float32, device=self.device).unsqueeze(0)
         elif isinstance(q_des, torch.Tensor):

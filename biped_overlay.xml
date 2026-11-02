@@ -1,0 +1,130 @@
+<mujoco model="biped_overlay">
+  <compiler angle="radian" coordinate="local" inertiafromgeom="false" balanceinertia="true"/>
+  <option timestep="0.002" gravity="0 0 -9.81"/>
+
+  <visual>
+    <headlight ambient="0.5 0.5 0.5" diffuse="0.8 0.8 0.8" specular="0.2 0.2 0.2"/>
+    <quality shadowsize="2048" offsamples="4"/>
+    <global offwidth="1280" offheight="720"/>
+  </visual>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.92 0.95 1.0" rgb2="0.65 0.75 0.88" width="512" height="512"/>
+    <texture name="grid" type="2d" builtin="checker" width="512" height="512" rgb1="0.95 0.95 0.95" rgb2="0.82 0.82 0.82"/>
+    <material name="grid_mat" texture="grid" texrepeat="25 25" reflectance="0.15"/>
+  </asset>
+
+  <worldbody>
+    <!-- Ground Plane at z = 0 -->
+    <geom name="floor" type="plane" pos="0 0 0" size="100 100 0.1" material="grid_mat"/>
+
+    <!-- ================================================================= -->
+    <!-- ROBOT 1: FADED GHOST (Mode 1: Ideal Unlimited PD Baseline)        -->
+    <!-- Semi-transparent cyan/blue ghost, no physics collisions (contype=0)-->
+    <!-- ================================================================= -->
+    <body name="pelvis_g" pos="0 0 0">
+      <joint name="root_x_g" type="slide" axis="1 0 0" damping="0" armature="0"/>
+      <joint name="root_z_g" type="slide" axis="0 0 1" damping="0" armature="0"/>
+      <joint name="root_p_g" type="hinge" axis="0 1 0" damping="0" armature="0"/>
+      <inertial pos="0 0 0.04" mass="10.65" diaginertia="0.06 0.10 0.06"/>
+      <geom name="pelvis_geom_g" type="capsule" fromto="0 0 0 0 0 0.10" size="0.05" rgba="0.25 0.65 0.90 0.30" contype="0" conaffinity="0"/>
+
+      <body name="torso_g" pos="0 0 0.10">
+        <joint name="q_lum_g" type="hinge" axis="0 1 0" range="-0.469 0.620"/>
+        <inertial pos="0 0 0.2739" mass="25.0" diaginertia="0.25 0.4377 0.25"/>
+        <geom name="torso_geom_g" type="capsule" fromto="0 0 0 0 0 0.4725" size="0.06" rgba="0.25 0.65 0.90 0.30" contype="0" conaffinity="0"/>
+      </body>
+
+      <body name="thigh_l_g" pos="0 0.05 0">
+        <joint name="q_lh_g" type="hinge" axis="0 1 0" range="-1.5 0.8"/>
+        <inertial pos="0 0 -0.20" mass="8.5" diaginertia="0.09 0.15 0.09"/>
+        <geom name="thigh_l_geom_g" type="capsule" fromto="0 0 0 0 0 -0.42" size="0.045" rgba="0.25 0.65 0.90 0.30" contype="0" conaffinity="0"/>
+
+        <body name="shank_l_g" pos="0 0 -0.45">
+          <joint name="q_lk_g" type="hinge" axis="0 -1 0" range="-2.0 0.0"/>
+          <inertial pos="0 0 -0.20" mass="3.5" diaginertia="0.03 0.05 0.03"/>
+          <geom name="shank_l_geom_g" type="capsule" fromto="0 0 0 0 0 -0.40" size="0.035" rgba="0.25 0.65 0.90 0.30" contype="0" conaffinity="0"/>
+
+          <body name="foot_l_g" pos="0 0 -0.45">
+            <joint name="q_la_g" type="hinge" axis="0 -1 0" range="-1.2 1.2"/>
+            <inertial pos="0.05 0 0" mass="1.0" diaginertia="0.006 0.01 0.006"/>
+            <geom name="foot_l_sole_g" type="capsule" fromto="-0.07 0 0 0.17 0 0" size="0.02" rgba="0.25 0.65 0.90 0.30" contype="0" conaffinity="0"/>
+          </body>
+        </body>
+      </body>
+
+      <body name="thigh_r_g" pos="0 -0.05 0">
+        <joint name="q_rh_g" type="hinge" axis="0 1 0" range="-1.5 0.8"/>
+        <inertial pos="0 0 -0.20" mass="8.5" diaginertia="0.09 0.15 0.09"/>
+        <geom name="thigh_r_geom_g" type="capsule" fromto="0 0 0 0 0 -0.42" size="0.045" rgba="0.25 0.65 0.90 0.30" contype="0" conaffinity="0"/>
+
+        <body name="shank_r_g" pos="0 0 -0.45">
+          <joint name="q_rk_g" type="hinge" axis="0 -1 0" range="-2.0 0.0"/>
+          <inertial pos="0 0 -0.20" mass="3.5" diaginertia="0.03 0.05 0.03"/>
+          <geom name="shank_r_geom_g" type="capsule" fromto="0 0 0 0 0 -0.40" size="0.035" rgba="0.25 0.65 0.90 0.30" contype="0" conaffinity="0"/>
+
+          <body name="foot_r_g" pos="0 0 -0.45">
+            <joint name="q_ra_g" type="hinge" axis="0 -1 0" range="-1.2 1.2"/>
+            <inertial pos="0.05 0 0" mass="1.0" diaginertia="0.006 0.01 0.006"/>
+            <geom name="foot_r_sole_g" type="capsule" fromto="-0.07 0 0 0.17 0 0" size="0.02" rgba="0.25 0.65 0.90 0.30" contype="0" conaffinity="0"/>
+          </body>
+        </body>
+      </body>
+    </body>
+
+    <!-- ================================================================= -->
+    <!-- ROBOT 2: SOLID VIBRANT (Mode 2: Hard-Clamped MTG Torque)          -->
+    <!-- Full opacity, vibrant colors, normal contacts                     -->
+    <!-- ================================================================= -->
+    <body name="pelvis" pos="0 0 0">
+      <joint name="root_x" type="slide" axis="1 0 0" damping="0" armature="0"/>
+      <joint name="root_z" type="slide" axis="0 0 1" damping="0" armature="0"/>
+      <joint name="root_p" type="hinge" axis="0 1 0" damping="0" armature="0"/>
+      <inertial pos="0 0 0.04" mass="10.65" diaginertia="0.06 0.10 0.06"/>
+      <geom name="pelvis_geom" type="capsule" fromto="0 0 0 0 0 0.10" size="0.05" rgba="0.12 0.47 0.71 1" contype="0" conaffinity="0"/>
+
+      <body name="torso" pos="0 0 0.10">
+        <joint name="q_lum" type="hinge" axis="0 1 0" range="-0.469 0.620"/>
+        <inertial pos="0 0 0.2739" mass="25.0" diaginertia="0.25 0.4377 0.25"/>
+        <geom name="torso_geom" type="capsule" fromto="0 0 0 0 0 0.4725" size="0.06" rgba="0.55 0.34 0.29 1" contype="0" conaffinity="0"/>
+        <site name="trunk_tip" pos="0 0 0.4725" size="0.02" rgba="0.9 0.2 0.2 1"/>
+      </body>
+
+      <body name="thigh_l" pos="0 0.05 0">
+        <joint name="q_lh" type="hinge" axis="0 1 0" range="-1.5 0.8"/>
+        <inertial pos="0 0 -0.20" mass="8.5" diaginertia="0.09 0.15 0.09"/>
+        <geom name="thigh_l_geom" type="capsule" fromto="0 0 0 0 0 -0.42" size="0.045" rgba="1.0 0.5 0.05 1" contype="0" conaffinity="0"/>
+
+        <body name="shank_l" pos="0 0 -0.45">
+          <joint name="q_lk" type="hinge" axis="0 -1 0" range="-2.0 0.0"/>
+          <inertial pos="0 0 -0.20" mass="3.5" diaginertia="0.03 0.05 0.03"/>
+          <geom name="shank_l_geom" type="capsule" fromto="0 0 0 0 0 -0.40" size="0.035" rgba="1.0 0.5 0.05 1" contype="0" conaffinity="0"/>
+
+          <body name="foot_l" pos="0 0 -0.45">
+            <joint name="q_la" type="hinge" axis="0 -1 0" range="-1.2 1.2"/>
+            <inertial pos="0.05 0 0" mass="1.0" diaginertia="0.006 0.01 0.006"/>
+            <geom name="foot_l_sole" type="capsule" fromto="-0.07 0 0 0.17 0 0" size="0.02" rgba="0.84 0.15 0.16 1"/>
+          </body>
+        </body>
+      </body>
+
+      <body name="thigh_r" pos="0 -0.05 0">
+        <joint name="q_rh" type="hinge" axis="0 1 0" range="-1.5 0.8"/>
+        <inertial pos="0 0 -0.20" mass="8.5" diaginertia="0.09 0.15 0.09"/>
+        <geom name="thigh_r_geom" type="capsule" fromto="0 0 0 0 0 -0.42" size="0.045" rgba="0.17 0.63 0.17 1" contype="0" conaffinity="0"/>
+
+        <body name="shank_r" pos="0 0 -0.45">
+          <joint name="q_rk" type="hinge" axis="0 -1 0" range="-2.0 0.0"/>
+          <inertial pos="0 0 -0.20" mass="3.5" diaginertia="0.03 0.05 0.03"/>
+          <geom name="shank_r_geom" type="capsule" fromto="0 0 0 0 0 -0.40" size="0.035" rgba="0.17 0.63 0.17 1" contype="0" conaffinity="0"/>
+
+          <body name="foot_r" pos="0 0 -0.45">
+            <joint name="q_ra" type="hinge" axis="0 -1 0" range="-1.2 1.2"/>
+            <inertial pos="0.05 0 0" mass="1.0" diaginertia="0.006 0.01 0.006"/>
+            <geom name="foot_r_sole" type="capsule" fromto="-0.07 0 0 0.17 0 0" size="0.02" rgba="0.58 0.40 0.74 1"/>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+</mujoco>

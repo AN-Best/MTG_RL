@@ -1,6 +1,6 @@
 # 10-DoF Musculoskeletal Biped — MuJoCo Physics & 500 Hz MTG Actuators
 
-A **MuJoCo + PyTorch** reinforcement learning framework for a 10-Degree-of-Freedom (10-DoF) sagittal-plane musculoskeletal biped comparing **Unconstrained Ideal PD Control (Mode 1)** against **Biologically Clamped Hill-Type Muscle Torque Generators (Mode 2)** across human walking, slow running (`2.0 m/s`), and fast sprinting (`5.0 m/s`).
+A **MuJoCo + PyTorch** reinforcement learning framework for a 10-Degree-of-Freedom (10-DoF) sagittal-plane musculoskeletal biped comparing **Unconstrained Ideal PD Control (Mode 1)** against **Biologically Clamped Hill-Type Muscle Torque Generators (Mode 2)** across human walking (`1.25 m/s`), slow running (`2.0 m/s`), fast sprinting (`5.0 m/s`), and **pure RL motion generation for a Maximum Height Vertical Jump** (no reference trial to imitate).
 
 ---
 
@@ -24,14 +24,18 @@ MTG_RL/
 │   ├── exp2_run20_mode1.pt                 # Exp 2 Slow Running (2 m/s) — Mode 1 (Unlimited PD)
 │   ├── exp2_run20_mode2.pt                 # Exp 2 Slow Running (2 m/s) — Mode 2 (MTG Clamped)
 │   ├── exp3_run50_mode1.pt                 # Exp 3 Fast Running (5 m/s) — Mode 1 (Unlimited PD)
-│   └── exp3_run50_mode2.pt                 # Exp 3 Fast Running (5 m/s) — Mode 2 (MTG Clamped)
+│   ├── exp3_run50_mode2.pt                 # Exp 3 Fast Running (5 m/s) — Mode 2 (MTG Clamped)
+│   ├── exp4_jump_mode1.pt                  # Exp 4 Max Height Jump (Pure RL) — Mode 1 (Unlimited PD)
+│   └── exp4_jump_mode2.pt                  # Exp 4 Max Height Jump (Pure RL) — Mode 2 (MTG Clamped)
 ├── renders/
 │   ├── exp1_walking_overlay.gif
 │   ├── exp1_walking_torque_limits.png
 │   ├── exp2_slow_running_2ms_overlay.gif
 │   ├── exp2_slow_running_2ms_torque_limits.png
 │   ├── exp3_fast_running_5ms_overlay.gif
-│   └── exp3_fast_running_5ms_torque_limits.png
+│   ├── exp3_fast_running_5ms_torque_limits.png
+│   ├── exp4_max_jump_overlay.gif
+│   └── exp4_max_jump_torque_limits.png
 └── requirements.txt
 ```
 
@@ -77,6 +81,8 @@ At each `0.002s` physics sub-step:
 | | | **Mode 2** (MTG Clamped) | `180/180` (`Fell=False`) | `7.30 m` | `2.03 m/s` | **`0.000000 N*m`** | **`0.000000 N*m`** |
 | **3. Fast Running** (`5.0 m/s`) | `Hamner2013_Run50_cycle.npz` | **Mode 1** (Unlimited) | `180/180` (`Fell=False`) | `18.92 m` | `5.26 m/s` | `97.55 N*m` | `309.99 N*m` |
 | | | **Mode 2** (MTG Clamped) | `180/180` (`Fell=False`) | `14.48 m` | `4.02 m/s` | **`0.000000 N*m`** | **`0.000000 N*m`** |
+| **4. Max Height Jump** (Pure RL) | *None (Pure Motion Generation)* | **Mode 1** (Unlimited) | `36/36` (`Apex, Fell=False`) | `Peak z = 1.26 m` (`+34.1 cm`) | `Peak Vz = 3.24 m/s` | `89.47 N*m` | `742.15 N*m` |
+| | | **Mode 2** (MTG Clamped) | `32/32` (`Apex, Fell=False`) | `Peak z = 1.10 m` (`+18.3 cm`) | `Peak Vz = 2.22 m/s` | **`0.000000 N*m`** | **`0.000000 N*m`** |
 
 ---
 
@@ -110,9 +116,22 @@ At `5.0 m/s`, Mode 1 sustains `5.26 m/s` (`18.92 m`) only by violating biologica
 
 ---
 
+## 🦘 Experiment 4: Maximum Height Vertical Jump (Pure Motion Generation via RL)
+
+With **no reference trial to imitate**, the RL policy discovers an injury-free countermovement vertical jump from quiet standing (`z = 0.92 m`) purely by maximizing apex height (`max_z`) while respecting safe physiological joint range-of-motion bounds:
+- **Injury-Safe Countermovement & Joint Protection**: Both Mode 1 and Mode 2 execute a controlled athletic countermovement squat (`t = 0.00–0.28 s`, keeping minimum pelvis height `min_z = 0.63–0.67 m` above the `0.62 m` safety floor and knee flexion within `-80° to -91°`) and smoothly cushion knee extension near takeoff (`-8.7°` max extension) so the joints never hyperextend or slam into anatomical stops (`0.0 N*m` passive knee strain, `< 1 N*m` passive ankle strain, and `~81 N*m` elastic hip support at the bottom of the crouch).
+- **Mode 1 (Unlimited PD)**: Generates unbiological bilateral knee extension torques (`~445 N*m`) even at high concentric extension velocities, violating the Hill-type MTG envelope by an average of `89.47 N*m` (peaking at `742.15 N*m` across joints during push-off) to launch the pelvis to **`1.26 m` (`+34.1 cm` pelvis rise, `39.0 cm` foot clearance, `3.24 m/s` peak vertical velocity)**.
+- **Mode 2 (500 Hz Clamped Hill-Type MTG)**: As the hips, knees, and ankles rapidly extend during takeoff (`t = 0.22–0.42 s`), the concentric Force-Velocity hyperbola $f_V(\dot{q})$ narrows the active torque envelope $\pm a(t) T_{LV}(q, \dot{q})$. Active clamping engages on `43.8–46.9%` of knee sub-steps (clipping up to `333.8 N*m` of excess PD demand) and `29.7–35.6%` of hip sub-steps, launching the musculoskeletal biped to its biologically feasible apex of **`1.10 m` (`+18.3 cm` pelvis rise, `21.7 cm` foot clearance, `2.22 m/s` peak vertical velocity)** with **`0.000000 N*m`** torque violation.
+
+![Experiment 4 Max Height Jump Overlay](renders/exp4_max_jump_overlay.gif)
+
+![Experiment 4 Max Height Jump Torque and Limits](renders/exp4_max_jump_torque_limits.png)
+
+---
+
 ## 🚀 Running the Suite
 
-To run or re-render all three experiments (loads existing checkpoints in `checkpoints/` or trains from scratch if removed):
+To run or re-render all four experiments (loads existing checkpoints in `checkpoints/` or trains from scratch if removed):
 
 ```bash
 python run_all_experiments.py

@@ -271,6 +271,75 @@ class MTGClampedActuator(BaseActuator):
         return tau_total, a_next
 
 # -----------------------------------------------------------------------------
+# Mode 2 (Elderly): Personalized Elderly Adult MTG Clamped Actuator
+# -----------------------------------------------------------------------------
+class ElderlyMTGClampedActuator(MTGClampedActuator):
+    """
+    Personalized Elderly Adult MTG Clamped Actuator (Ages 70-86 yrs, Mean 77.8 yrs).
+    Calibrated using the Millard et al. (2019) 5-parameter MTG personalization
+    methodology from PersonalMTG (x = [s_A, s_V, delta_P, lambda_P, s_s]) on the
+    healthy elderly adult biomechanics cohort (Sub01-Sub33, n=33, ages 70-86 yrs)
+    relative to the young adult reference cohort (Sub111-Sub138, n=25, ages 20-29 yrs):
+      - Isometric Strength Scaling (s_s):
+          * Knee Extension:  s_s = 0.659 (-34.1%, p = 0.0024) -> 329.6 N*m
+          * Knee Flexion:    s_s = 0.800 (-20.0%)             -> 160.0 N*m
+          * Ankle Plantar:   s_s = 0.767 (-23.3%, p = 0.0001) -> 291.4 N*m
+          * Ankle Dorsi:     s_s = 0.767 (-23.3%)             ->  76.7 N*m
+          * Hip Extension:   s_s = 0.792 (-20.8%)             -> 316.9 N*m
+          * Hip Flexion:     s_s = 0.787 (-21.3%, p = 0.0128) -> 236.1 N*m
+          * Lumbar Ext/Flex: s_s = 0.800 (-20.0%)             -> 240.0 / 320.0 N*m
+      - Active Torque-Angle Width Scaling (s_A):
+          * s_A = [0.94, 0.94, 0.92, 0.95, 0.94, 0.92, 0.95] (reduced functional ROM)
+      - Maximum Shortening Velocity Scaling (s_V):
+          * s_V = [0.90, 0.90, 0.88, 0.90, 0.90, 0.88, 0.90] (Type-II fast-twitch atrophy)
+      - Passive Stiffness & Flexibility Shift (delta_P, k_pass):
+          * +15% passive tissue stiffness and 3.0-3.5 deg earlier passive engagement
+      - Slower Muscle Activation/Deactivation Dynamics:
+          * tau_act = 24 ms (vs 20 ms), tau_deact = 48 ms (vs 40 ms)
+    """
+    def __init__(self, device="cuda:0"):
+        super().__init__(device=device)
+        from personal_mtg.elderly_personalizer import fit_elderly_population_mtg_scaling
+
+        scaling = fit_elderly_population_mtg_scaling()
+
+        # Millard 5-parameter personalization factors [Lumbar, Hip_L, Knee_L, Ankle_L, Hip_R, Knee_R, Ankle_R]
+        self.s_s_pos_np = scaling["s_s_pos"]
+        self.s_s_neg_np = scaling["s_s_neg"]
+        self.s_A_np = scaling["s_A"]
+        self.s_V_np = scaling["s_V"]
+        self.delta_P_np = scaling["delta_P_rad"]
+        self.k_pass_scale = scaling["k_pass_scale"]
+        self.millard_fits = scaling["millard_fits"]
+
+        # Apply personalization to numpy arrays
+        self.T_max_pos_np = (self.T_max_pos_np * self.s_s_pos_np).astype(np.float32)
+        self.T_max_neg_np = (self.T_max_neg_np * self.s_s_neg_np).astype(np.float32)
+        self.w_np = (self.w_np * self.s_A_np).astype(np.float32)
+        self.u_max_pos_np = (self.u_max_pos_np * self.s_V_np).astype(np.float32)
+        self.u_max_neg_np = (self.u_max_neg_np * self.s_V_np).astype(np.float32)
+        self.k1_pass_np = (self.k1_pass_np * self.k_pass_scale).astype(np.float32)
+        self.k2_pass_np = (self.k2_pass_np * self.k_pass_scale).astype(np.float32)
+        self.q2_pass_np = (self.q2_pass_np + self.delta_P_np).astype(np.float32)
+
+        # Sync PyTorch buffers
+        self.T_max_pos.copy_(torch.tensor(self.T_max_pos_np, dtype=torch.float32, device=self.device))
+        self.T_max_neg.copy_(torch.tensor(self.T_max_neg_np, dtype=torch.float32, device=self.device))
+        self.w_pos.copy_(torch.tensor(self.w_np, dtype=torch.float32, device=self.device))
+        self.w_neg.copy_(torch.tensor(self.w_np, dtype=torch.float32, device=self.device))
+        self.u_max_pos.copy_(torch.tensor(self.u_max_pos_np, dtype=torch.float32, device=self.device))
+        self.u_max_neg.copy_(torch.tensor(self.u_max_neg_np, dtype=torch.float32, device=self.device))
+        self.k1_pass.copy_(torch.tensor(self.k1_pass_np, dtype=torch.float32, device=self.device))
+        self.k2_pass.copy_(torch.tensor(self.k2_pass_np, dtype=torch.float32, device=self.device))
+        self.q2_pass.copy_(torch.tensor(self.q2_pass_np, dtype=torch.float32, device=self.device))
+
+        # Slower elderly calcium release/reuptake dynamics
+        self.tau_act = scaling["tau_act"]
+        self.tau_deact = scaling["tau_deact"]
+        self.actuator_type = "mtg_elderly"
+
+
+# -----------------------------------------------------------------------------
 # Actuator Factory
 # -----------------------------------------------------------------------------
 def create_actuator(actuator_type="ideal_unlimited", device="cuda:0"):
@@ -279,5 +348,7 @@ def create_actuator(actuator_type="ideal_unlimited", device="cuda:0"):
         return IdealUnlimitedActuator(device=device)
     elif actuator_type in ["mtg_clamped", "mtg", "clamped", "mode2"]:
         return MTGClampedActuator(device=device)
+    elif actuator_type in ["mtg_elderly", "elderly", "mode2_elderly"]:
+        return ElderlyMTGClampedActuator(device=device)
     else:
-        raise ValueError(f"Unknown actuator type '{actuator_type}'. Choose 'ideal_unlimited' or 'mtg_clamped'.")
+        raise ValueError(f"Unknown actuator type '{actuator_type}'. Choose 'ideal_unlimited', 'mtg_clamped', or 'mtg_elderly'.")

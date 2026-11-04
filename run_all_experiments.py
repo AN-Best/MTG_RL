@@ -671,7 +671,9 @@ class MaxJumpEnv:
     def __init__(self, clip=None, mode="mode1", mtg_phase="hard", decimation=10, max_steps=60,
                  enable_perturbations=False):
         from Biped_Env import BipedEnv
+        from Biped_Actuators import ElderlyMTGClampedActuator
         self.clip = clip
+        self.is_elderly = (str(mode).lower() in ["mode2_elderly", "mtg_elderly", "elderly"])
         self.mode = "mode1" if mode in ["mode1", "ideal_unlimited", "unlimited"] else "mode2"
         self.mtg_phase = mtg_phase
         self.decimation = decimation
@@ -680,7 +682,10 @@ class MaxJumpEnv:
         if self.mode == "mode1":
             actuator_type = "ideal_unlimited"
         else:
-            actuator_type = "ideal_unlimited" if self.mtg_phase == "soft" else "mtg_clamped"
+            if self.mtg_phase == "soft":
+                actuator_type = "ideal_unlimited"
+            else:
+                actuator_type = "mtg_elderly" if self.is_elderly else "mtg_clamped"
 
         self.env = BipedEnv(actuator_type=actuator_type, device="cpu")
         self.pelvis_id = mujoco.mj_name2id(self.env.model, mujoco.mjtObj.mjOBJ_GEOM, "pelvis_geom")
@@ -722,16 +727,33 @@ class MaxJumpEnv:
         self.q2_pass = np.array([0.50, 1.20, 0.05, 0.40, 1.20, 0.05, 0.40], dtype=np.float32)
 
         if self.mode == "mode2":
-            self.T_max_pos = np.array([300.0, 400.0, 500.0, 100.0, 400.0, 500.0, 100.0], dtype=np.float32)
-            self.T_max_neg = np.array([400.0, 300.0, 200.0, 380.0, 300.0, 200.0, 380.0], dtype=np.float32)
-            self.q_opt = np.array([0.0, -0.40, -0.90, 0.35, -0.40, -0.90, 0.35], dtype=np.float32)
-            self.w = np.array([1.20, 1.20, 1.20, 1.10, 1.20, 1.20, 1.10], dtype=np.float32)
-            self.u_max_pos = np.array([12.0, 15.0, 18.0, 16.0, 15.0, 18.0, 16.0], dtype=np.float32)
-            self.u_max_neg = np.array([12.0, 15.0, 18.0, 22.0, 15.0, 18.0, 22.0], dtype=np.float32)
-            self.tau_act = 0.020
-            self.tau_deact = 0.040
-            self.a_min = 0.01
-            self.a_init = 0.35
+            if self.is_elderly:
+                ref_eld = ElderlyMTGClampedActuator(device="cpu")
+                self.T_max_pos = ref_eld.T_max_pos_np.copy()
+                self.T_max_neg = ref_eld.T_max_neg_np.copy()
+                self.q_opt = ref_eld.q_opt_np.copy()
+                self.w = ref_eld.w_np.copy()
+                self.u_max_pos = ref_eld.u_max_pos_np.copy()
+                self.u_max_neg = ref_eld.u_max_neg_np.copy()
+                self.k1_pass = ref_eld.k1_pass_np.copy()
+                self.k2_pass = ref_eld.k2_pass_np.copy()
+                self.q1_pass = ref_eld.q1_pass_np.copy()
+                self.q2_pass = ref_eld.q2_pass_np.copy()
+                self.tau_act = ref_eld.tau_act
+                self.tau_deact = ref_eld.tau_deact
+                self.a_min = ref_eld.a_min
+                self.a_init = ref_eld.a_init
+            else:
+                self.T_max_pos = np.array([300.0, 400.0, 500.0, 100.0, 400.0, 500.0, 100.0], dtype=np.float32)
+                self.T_max_neg = np.array([400.0, 300.0, 200.0, 380.0, 300.0, 200.0, 380.0], dtype=np.float32)
+                self.q_opt = np.array([0.0, -0.40, -0.90, 0.35, -0.40, -0.90, 0.35], dtype=np.float32)
+                self.w = np.array([1.20, 1.20, 1.20, 1.10, 1.20, 1.20, 1.10], dtype=np.float32)
+                self.u_max_pos = np.array([12.0, 15.0, 18.0, 16.0, 15.0, 18.0, 16.0], dtype=np.float32)
+                self.u_max_neg = np.array([12.0, 15.0, 18.0, 22.0, 15.0, 18.0, 22.0], dtype=np.float32)
+                self.tau_act = 0.020
+                self.tau_deact = 0.040
+                self.a_min = 0.01
+                self.a_init = 0.35
             self.a_soft = np.full(7, self.a_init, dtype=np.float32)
 
     def reset(self, start_frame=None):
@@ -1061,12 +1083,148 @@ def make_jump_policy(obs_dim=64, device=device, warm_start_path=None):
     return policy
 
 
+def plot_elderly_mtg_personalization(
+    personalization_plot_path,
+    t_arr,
+    z1_500,
+    z2_500,
+    z3_500,
+    env1,
+    env2,
+    env3,
+    dz_zeroshot_cm
+):
+    """
+    Generates a comprehensive 6-panel figure comparing the Unscaled Young Adult MTG
+    (Ages 20-29 yrs) vs Personalized Elderly Adult MTG (Ages 70-86 yrs, Millard 5-param
+    scaling from PersonalMTG) and the resulting vertical jump performance.
+    """
+    fig, axes = plt.subplots(2, 3, figsize=(17, 10))
+    act_y = env2.env.actuator
+    act_e = env3.env.actuator
+
+    # Panel (0,0): Knee Extension Active Torque-Angle Curve T_max * f_L(q) + Passive
+    ax = axes[0, 0]
+    q_knee = np.linspace(-1.75, 0.0, 200)
+    fL_k_y = act_y.T_max_pos_np[2] * np.exp(-((q_knee - act_y.q_opt_np[2]) / act_y.w_np[2]) ** 2)
+    fL_k_e = act_e.T_max_pos_np[2] * np.exp(-((q_knee - act_e.q_opt_np[2]) / act_e.w_np[2]) ** 2)
+    pass_k_y = act_y.k1_pass_np[2] * np.maximum(0.0, act_y.q1_pass_np[2] - q_knee) ** 2 - act_y.k2_pass_np[2] * np.maximum(0.0, q_knee - act_y.q2_pass_np[2]) ** 2
+    pass_k_e = act_e.k1_pass_np[2] * np.maximum(0.0, act_e.q1_pass_np[2] - q_knee) ** 2 - act_e.k2_pass_np[2] * np.maximum(0.0, q_knee - act_e.q2_pass_np[2]) ** 2
+    ax.plot(np.degrees(q_knee), fL_k_y, "r-", lw=2.2, label=f"Unscaled Young Knee Ext (T_max={act_y.T_max_pos_np[2]:.0f} Nm)")
+    ax.plot(np.degrees(q_knee), fL_k_e, color="purple", linestyle="-", lw=2.2, label=f"Elderly Personalized Knee Ext (s_s=0.659, {act_e.T_max_pos_np[2]:.0f} Nm)")
+    ax.plot(np.degrees(q_knee), np.abs(pass_k_y), "r:", lw=1.4, alpha=0.75, label="Young Passive Restoring |tau_pass|")
+    ax.plot(np.degrees(q_knee), np.abs(pass_k_e), color="purple", linestyle=":", lw=1.6, alpha=0.85, label="Elderly Passive |tau_pass| (+15% k, -3 deg shift)")
+    ax.set_title("Knee Extension Torque-Angle Personalization\n(PersonalMTG Sub01-Sub33: -34.1% Isometric, p=0.0024)", fontsize=10.5, fontweight="bold")
+    ax.set_xlabel("Knee Angle (deg)")
+    ax.set_ylabel("Isometric Torque Capacity (N*m)")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="upper left", fontsize=7.5)
+
+    # Panel (0,1): Ankle Plantarflexion & Hip Extension Torque-Angle Curves
+    ax = axes[0, 1]
+    q_ank = np.linspace(-0.80, 0.80, 200)
+    fL_a_y = act_y.T_max_neg_np[3] * np.exp(-((q_ank - act_y.q_opt_np[3]) / act_y.w_np[3]) ** 2)
+    fL_a_e = act_e.T_max_neg_np[3] * np.exp(-((q_ank - act_e.q_opt_np[3]) / act_e.w_np[3]) ** 2)
+    q_hip = np.linspace(-1.30, 0.50, 200)
+    fL_h_y = act_y.T_max_pos_np[1] * np.exp(-((q_hip - act_y.q_opt_np[1]) / act_y.w_np[1]) ** 2)
+    fL_h_e = act_e.T_max_pos_np[1] * np.exp(-((q_hip - act_e.q_opt_np[1]) / act_e.w_np[1]) ** 2)
+    ax.plot(np.degrees(q_ank), fL_a_y, "r-", lw=2.0, label=f"Young Ankle Plantar (T_max={act_y.T_max_neg_np[3]:.0f} Nm)")
+    ax.plot(np.degrees(q_ank), fL_a_e, color="purple", linestyle="-", lw=2.0, label=f"Elderly Ankle Plantar (s_s=0.767, {act_e.T_max_neg_np[3]:.0f} Nm)")
+    ax.plot(np.degrees(q_hip), fL_h_y, "r--", lw=1.7, alpha=0.8, label=f"Young Hip Ext (T_max={act_y.T_max_pos_np[1]:.0f} Nm)")
+    ax.plot(np.degrees(q_hip), fL_h_e, color="purple", linestyle="--", lw=1.7, alpha=0.85, label=f"Elderly Hip Ext (s_s=0.792, {act_e.T_max_pos_np[1]:.0f} Nm)")
+    ax.set_title("Ankle Push-Off & Hip Extension Personalization\n(Ankle Power -23.3%, p<0.0001; Hip Power -20.8%)", fontsize=10.5, fontweight="bold")
+    ax.set_xlabel("Joint Angle (deg)")
+    ax.set_ylabel("Isometric Torque Capacity (N*m)")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="upper left", fontsize=7.5)
+
+    # Panel (0,2): Torque-Velocity Scaling T_max * f_V(qdot) at Optimal Angle
+    ax = axes[0, 2]
+    u_grid = np.linspace(-15.0, 18.0, 250)
+    nu_y = np.clip(u_grid / act_y.u_max_pos_np[2], -1.0, 1.0)
+    fV_y = np.where(nu_y >= 0.0, np.clip((1.0 - nu_y) / (1.0 + 4.0 * nu_y + 1e-6), 0.0, 1.0), np.clip(1.0 - 1.4 * nu_y / (1.0 - 4.0 * nu_y + 1e-6), 1.0, 1.6))
+    nu_e = np.clip(u_grid / act_e.u_max_pos_np[2], -1.0, 1.0)
+    fV_e = np.where(nu_e >= 0.0, np.clip((1.0 - nu_e) / (1.0 + 4.0 * nu_e + 1e-6), 0.0, 1.0), np.clip(1.0 - 1.4 * nu_e / (1.0 - 4.0 * nu_e + 1e-6), 1.0, 1.6))
+    ax.plot(u_grid, act_y.T_max_pos_np[2] * fV_y, "r-", lw=2.2, label=f"Young Knee Ext (u_max={act_y.u_max_pos_np[2]:.1f} rad/s)")
+    ax.plot(u_grid, act_e.T_max_pos_np[2] * fV_e, color="purple", linestyle="-", lw=2.2, label=f"Elderly Knee Ext (s_V=0.88, u_max={act_e.u_max_pos_np[2]:.1f} rad/s)")
+    ax.axvline(0.0, color="gray", linestyle=":", lw=1.0)
+    ax.set_title("Torque-Velocity Personalization (Type-II Fiber Atrophy)\n(Concentric Shortening Power Deficit at High Velocity)", fontsize=10.5, fontweight="bold")
+    ax.set_xlabel("Joint Angular Velocity qdot (rad/s, +Concentric)")
+    ax.set_ylabel("Max Dynamic Torque T_max * f_V(qdot) (N*m)")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="upper right", fontsize=7.5)
+
+    # Panel (1,0): Joint-by-Joint Peak Isometric Torque Comparison Bar Chart
+    ax = axes[1, 0]
+    j_labels = ["Lumbar\nExt", "Hip\nExt", "Knee\nExt", "Ankle\nPlantar", "Hip\nFlex", "Knee\nFlex"]
+    y_vals = [act_y.T_max_pos_np[0], act_y.T_max_pos_np[1], act_y.T_max_pos_np[2], act_y.T_max_neg_np[3], act_y.T_max_neg_np[1], act_y.T_max_neg_np[2]]
+    e_vals = [act_e.T_max_pos_np[0], act_e.T_max_pos_np[1], act_e.T_max_pos_np[2], act_e.T_max_neg_np[3], act_e.T_max_neg_np[1], act_e.T_max_neg_np[2]]
+    x_pos = np.arange(len(j_labels))
+    w_bar = 0.36
+    b1 = ax.bar(x_pos - w_bar/2, y_vals, w_bar, color="#ef4444", alpha=0.88, label="Unscaled Young Adult MTG (20-29 yrs)")
+    b2 = ax.bar(x_pos + w_bar/2, e_vals, w_bar, color="#7e22ce", alpha=0.88, label="Personalized Elderly MTG (70-86 yrs)")
+    for b_y, b_e in zip(b1, b2):
+        pct = (b_e.get_height() - b_y.get_height()) / b_y.get_height() * 100.0
+        ax.text(b_e.get_x() + b_e.get_width()/2, b_e.get_height() + 8, f"{pct:.0f}%", ha="center", va="bottom", fontsize=8, fontweight="bold", color="#581c87")
+    ax.set_xticks(x_pos)
+    ax.set_xticklabels(j_labels, fontsize=9)
+    ax.set_ylim(0, 560)
+    ax.set_ylabel("Peak Isometric Torque T_max (N*m)")
+    ax.set_title("Millard 5-Parameter Isometric Strength Scaling (s_s)\nAcross Primary Lower-Limb & Trunk Muscle Groups", fontsize=10.5, fontweight="bold")
+    ax.grid(True, axis="y", alpha=0.3)
+    ax.legend(loc="upper right", fontsize=8.0)
+
+    # Panel (1,1): Pelvis Height Trajectory z(t) Comparison
+    ax = axes[1, 1]
+    dz1_cm = (env1.max_z - env1.z_stand) * 100.0
+    dz2_cm = (env2.max_z - env2.z_stand) * 100.0
+    dz3_cm = (env3.max_z - env3.z_stand) * 100.0
+    ax.plot(t_arr, z1_500, "b--", lw=2.0, label=f"Mode 1 Unlimited PD (Peak {env1.max_z:.2f}m, +{dz1_cm:.1f} cm)")
+    ax.plot(t_arr, z2_500, "r-", lw=2.3, label=f"Mode 2 Unscaled Young MTG (Peak {env2.max_z:.2f}m, +{dz2_cm:.1f} cm)")
+    ax.plot(t_arr, z3_500, color="purple", linestyle="-", lw=2.3, label=f"Mode 2 Personalized Elderly MTG (Peak {env3.max_z:.2f}m, +{dz3_cm:.1f} cm)")
+    ax.axhline(env1.z_stand, color="green", linestyle=":", lw=1.4, label=f"Quiet Standing ({env1.z_stand:.2f}m)")
+    ax.set_title("Vertical Jump Pelvis Trajectory z(t) (500 Hz Simulation)\nCountermovement Squat -> Takeoff -> Apex Height", fontsize=10.5, fontweight="bold")
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("Pelvis Height z (m)")
+    ax.set_ylim(0.60, 1.35)
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="upper left", fontsize=7.8)
+
+    # Panel (1,2): Maximum Vertical Jump Height Comparison Bar Chart
+    ax = axes[1, 2]
+    models = [
+        "Mode 1:\nUnlimited PD\n(No MTG Limits)",
+        "Mode 2:\nUnscaled Young\nAdult MTG",
+        "Mode 2:\nPersonalized\nElderly MTG (RL)",
+        "Mode 2:\nElderly MTG\n(Zero-Shot Young)"
+    ]
+    heights_cm = [dz1_cm, dz2_cm, dz3_cm, dz_zeroshot_cm]
+    colors = ["#2563eb", "#dc2626", "#7e22ce", "#a855f7"]
+    bars = ax.bar(np.arange(len(models)), heights_cm, width=0.55, color=colors, edgecolor="black", linewidth=1.0, alpha=0.90)
+    for bar, h in zip(bars, heights_cm):
+        ax.text(bar.get_x() + bar.get_width()/2, h + 0.8, f"+{h:.1f} cm", ha="center", va="bottom", fontsize=9.5, fontweight="bold")
+    ax.set_xticks(np.arange(len(models)))
+    ax.set_xticklabels(models, fontsize=8.5)
+    ax.set_ylim(0, max(heights_cm) + 6.0)
+    ax.set_ylabel("Vertical Jump Height Δz = max_z - z_stand (cm)")
+    drop_pct = (dz3_cm - dz2_cm) / dz2_cm * 100.0
+    ax.set_title(f"Maximum Vertical Jump Height Comparison\n(Elderly Personalized MTG Jump is {abs(drop_pct):.1f}% Lower Than Unscaled MTG)", fontsize=10.5, fontweight="bold")
+    ax.grid(True, axis="y", alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(personalization_plot_path, dpi=200)
+    plt.close()
+    print(f"[DONE] Saved Elderly MTG Personalization & Jump Comparison Plot: {personalization_plot_path}")
+
+
 def evaluate_500hz_jump_experiment(
     exp_title,
     policy1,
     policy2,
+    policy2_elderly,
     gif_path,
     plot_path,
+    personalization_plot_path="renders/exp4_elderly_mtg_personalization.png",
     max_steps=60
 ):
     print("\n" + "=" * 78)
@@ -1074,19 +1232,32 @@ def evaluate_500hz_jump_experiment(
     print("=" * 78)
     os.makedirs("renders", exist_ok=True)
 
+    # First evaluate Zero-Shot Unscaled Young Policy on Personalized Elderly MTG Body
+    env_zs = MaxJumpEnv(mode="mode2_elderly", mtg_phase="hard", max_steps=max_steps)
+    obs_zs = env_zs.reset(start_frame=0)
+    for _ in range(max_steps):
+        with torch.no_grad():
+            a_zs, _, _ = policy2.get_action(torch.tensor(obs_zs, dtype=torch.float32, device=device).unsqueeze(0), deterministic=True)
+        obs_zs, _, d_zs, _ = env_zs.step(a_zs.squeeze(0).cpu().numpy())
+        if d_zs:
+            break
+    dz_zeroshot_cm = (env_zs.max_z - env_zs.z_stand) * 100.0
+
     env1 = MaxJumpEnv(mode="mode1", max_steps=max_steps)
     env2 = MaxJumpEnv(mode="mode2", mtg_phase="hard", max_steps=max_steps)
+    env3 = MaxJumpEnv(mode="mode2_elderly", mtg_phase="hard", max_steps=max_steps)
 
     obs1 = env1.reset(start_frame=0)
     obs2 = env2.reset(start_frame=0)
+    obs3 = env3.reset(start_frame=0)
 
-    overlay_model = mujoco.MjModel.from_xml_path("biped_overlay.xml")
+    overlay_model = mujoco.MjModel.from_xml_path("biped_overlay_jump.xml")
     overlay_data = mujoco.MjData(overlay_model)
     renderer = mujoco.Renderer(overlay_model, height=540, width=960)
     camera = mujoco.MjvCamera()
     camera.distance = 3.8
     camera.elevation = -8.0
-    camera.azimuth = 85.0
+    camera.azimuth = 90.0
 
     t_500 = []
     tau1_500 = []
@@ -1099,25 +1270,35 @@ def evaluate_500hz_jump_experiment(
     T_act_neg2_500 = []
     T_LV_pos2_500 = []
     T_LV_neg2_500 = []
-    z1_500, z2_500 = [], []
-    ex1_500, ex2_500 = [], []
+
+    tau3_pd_500 = []
+    tau3_clamped_500 = []
+    tau3_passive_500 = []
+    T_pos3_500 = []
+    T_neg3_500 = []
+
+    z1_500, z2_500, z3_500 = [], [], []
+    ex1_500, ex2_500, ex3_500 = [], [], []
 
     a1_shadow = np.full(7, env2.env.actuator.a_init, dtype=np.float32)
 
     frames = []
-    done1, done2 = False, False
-    fell1, fell2 = False, False
-    step1_survived, step2_survived = 0, 0
+    done1, done2, done3 = False, False, False
+    fell1, fell2, fell3 = False, False, False
+    step1_survived, step2_survived, step3_survived = 0, 0, 0
     substep_idx = 0
     q1_apex_pose = None
     q2_apex_pose = None
+    q3_apex_pose = None
 
     for step in range(max_steps):
         with torch.no_grad():
             a1, _, _ = policy1.get_action(torch.tensor(obs1, dtype=torch.float32, device=device).unsqueeze(0), deterministic=True)
             a2, _, _ = policy2.get_action(torch.tensor(obs2, dtype=torch.float32, device=device).unsqueeze(0), deterministic=True)
+            a3, _, _ = policy2_elderly.get_action(torch.tensor(obs3, dtype=torch.float32, device=device).unsqueeze(0), deterministic=True)
         act1 = a1.squeeze(0).cpu().numpy()
         act2 = a2.squeeze(0).cpu().numpy()
+        act3 = a3.squeeze(0).cpu().numpy()
 
         prev_f1 = env1.filtered_action.copy()
         f1 = 0.25 * env1.filtered_action + 0.75 * act1
@@ -1128,6 +1309,11 @@ def evaluate_500hz_jump_experiment(
         f2 = 0.25 * env2.filtered_action + 0.75 * act2
         if not done2:
             env2.filtered_action = f2.copy()
+
+        prev_f3 = env3.filtered_action.copy()
+        f3 = 0.25 * env3.filtered_action + 0.75 * act3
+        if not done3:
+            env3.filtered_action = f3.copy()
 
         for sub_step in range(env1.decimation):
             alpha = (sub_step + 1) / float(env1.decimation)
@@ -1163,7 +1349,7 @@ def evaluate_500hz_jump_experiment(
                 ex1_k = np.nan
                 z1_k = float(env1.max_z)
 
-            # --- Mode 2 Sub-step ---
+            # --- Mode 2 (Unscaled Young Adult MTG) Sub-step ---
             if not done2:
                 act_k2 = (1.0 - alpha) * prev_f2 + alpha * f2
                 q_j2 = env2.env.data.qpos[3:10].astype(np.float32)
@@ -1201,6 +1387,36 @@ def evaluate_500hz_jump_experiment(
                 ex2_k = np.nan
                 z2_k = float(env2.max_z)
 
+            # --- Mode 2 (Personalized Elderly Adult MTG) Sub-step ---
+            if not done3:
+                act_k3 = (1.0 - alpha) * prev_f3 + alpha * f3
+                q_j3 = env3.env.data.qpos[3:10].astype(np.float32)
+                u_j3 = env3.env.data.qvel[3:10].astype(np.float32)
+                q_des3 = env3._compute_safe_q_des(env3.q_nom + act_k3, q_j3)
+                tau3_pd_k = env3.env.actuator.Kp_np * (q_des3 - q_j3) - env3.env.actuator.Kd_np * u_j3
+
+                _, tau3_k = env3.env.step_simulation(q_des3, dt_sim=0.002, u_des=None)
+                Tp3 = env3.env.actuator.last_T_pos
+                Tn3 = env3.env.actuator.last_T_neg
+                tau3_pass_k = env3.env.actuator.last_tau_passive
+                ex3_k = float(np.sum(np.maximum(0.0, tau3_k - Tp3) + np.maximum(0.0, -tau3_k - Tn3)))
+                z3_k = float(env3.env.data.qpos[1])
+                vz3_k = float(env3.env.data.qvel[1])
+                if z3_k > env3.max_z:
+                    env3.max_z = z3_k
+                if vz3_k > env3.max_vz:
+                    env3.max_vz = vz3_k
+                if not env3.has_taken_off and z3_k < env3.min_z:
+                    env3.min_z = z3_k
+            else:
+                tau3_pd_k = np.full(7, np.nan, dtype=np.float32)
+                tau3_k = np.full(7, np.nan, dtype=np.float32)
+                tau3_pass_k = np.full(7, np.nan, dtype=np.float32)
+                Tp3 = np.full(7, np.nan, dtype=np.float32)
+                Tn3 = np.full(7, np.nan, dtype=np.float32)
+                ex3_k = np.nan
+                z3_k = float(env3.max_z)
+
             t_500.append(substep_idx * 0.002)
             tau1_500.append(tau1_k.copy())
             tau2_pd_500.append(tau2_pd_k.copy())
@@ -1212,10 +1428,19 @@ def evaluate_500hz_jump_experiment(
             T_act_neg2_500.append(T_act_n2.copy())
             T_LV_pos2_500.append(T_LV_p2.copy())
             T_LV_neg2_500.append(T_LV_n2.copy())
+
+            tau3_pd_500.append(tau3_pd_k.copy())
+            tau3_clamped_500.append(tau3_k.copy())
+            tau3_passive_500.append(tau3_pass_k.copy())
+            T_pos3_500.append(Tp3.copy())
+            T_neg3_500.append(Tn3.copy())
+
             z1_500.append(z1_k)
             z2_500.append(z2_k)
+            z3_500.append(z3_k)
             ex1_500.append(ex1_k)
             ex2_500.append(ex2_k)
+            ex3_500.append(ex3_k)
             substep_idx += 1
 
         if not done1:
@@ -1262,15 +1487,44 @@ def evaluate_500hz_jump_experiment(
                 q2_apex_pose = q2[:10].copy()
                 done2 = True
 
-        q1_vis = q1_apex_pose if q1_apex_pose is not None else env1.env.data.qpos[:10]
-        q2_vis = q2_apex_pose if q2_apex_pose is not None else env2.env.data.qpos[:10]
+        if not done3:
+            env3.current_frame += env3.decimation
+            env3.step_count += 1
+            env3.prev_action = act3.copy()
+            fl3, fr3, fz3 = env3._get_contacts_and_foot_z()
+            if fz3 > env3.max_foot_z:
+                env3.max_foot_z = fz3
+            if fl3 < 1.0 and fr3 < 1.0 and env3.env.data.qpos[1] > env3.z_stand + 0.02:
+                env3.has_taken_off = True
+            if env3.has_taken_off and env3.env.data.qvel[1] <= 0.0:
+                env3.apex_reached = True
+                env3.post_apex_steps += 1
+            obs3 = env3.get_obs()
+            step3_survived = step + 1
+            q3 = env3.env.data.qpos
+            if q3[1] < 0.62 or abs(q3[2]) > 0.55 or abs(q3[0]) > 0.75:
+                fell3 = True
+                done3 = True
+            elif env3.apex_reached and env3.post_apex_steps >= 2:
+                q3_apex_pose = q3[:10].copy()
+                done3 = True
+
+        q1_vis = (q1_apex_pose if q1_apex_pose is not None else env1.env.data.qpos[:10]).copy()
+        q2_vis = (q2_apex_pose if q2_apex_pose is not None else env2.env.data.qpos[:10]).copy()
+        q3_vis = (q3_apex_pose if q3_apex_pose is not None else env3.env.data.qpos[:10]).copy()
+
+        # Position the 3 jumpers side-by-side along X (-0.65m Left, 0.0m Center, +0.65m Right)
+        q1_vis[0] -= 0.65
+        q3_vis[0] += 0.65
+
         overlay_data.qpos[:10] = q1_vis
         overlay_data.qpos[10:20] = q2_vis
+        overlay_data.qpos[20:30] = q3_vis
         mujoco.mj_forward(overlay_model, overlay_data)
 
         camera.lookat[0] = 0.0
         camera.lookat[1] = 0.0
-        camera.lookat[2] = 0.90
+        camera.lookat[2] = 0.88
 
         renderer.update_scene(overlay_data, camera)
         rgb = renderer.render()
@@ -1279,15 +1533,16 @@ def evaluate_500hz_jump_experiment(
 
         dz1_cm = (env1.max_z - env1.z_stand) * 100.0
         dz2_cm = (env2.max_z - env2.z_stand) * 100.0
-        s1_str = f"z={q1_vis[1]:.2f}m (Max +{dz1_cm:.1f}cm)"
-        s2_str = f"z={q2_vis[1]:.2f}m (Max +{dz2_cm:.1f}cm)"
-        text_str = f"{exp_title} | Mode 1 Unlimited (Ghost): {s1_str} | Mode 2 MTG Clamped (Solid): {s2_str}"
-        draw.rectangle([(15, 15), (945, 52)], fill=(15, 23, 42, 220), outline=(56, 189, 248), width=2)
-        draw.text((25, 25), text_str, fill=(240, 249, 255))
+        dz3_cm = (env3.max_z - env3.z_stand) * 100.0
+        s1_str = f"Left [Mode 1 Unlimited]: +{dz1_cm:.1f}cm"
+        s2_str = f"Center [Mode 2 Young MTG]: +{dz2_cm:.1f}cm"
+        s3_str = f"Right [Mode 2 Elderly MTG]: +{dz3_cm:.1f}cm"
+        text_str = f"{exp_title} | {s1_str} | {s2_str} | {s3_str}"
+        draw.rectangle([(10, 12), (950, 50)], fill=(15, 23, 42, 225), outline=(56, 189, 248), width=2)
+        draw.text((20, 23), text_str, fill=(240, 249, 255))
         frames.append(np.array(pil_img))
 
-        if done1 and done2:
-            # Hold final apex comparison frame for 12 frames (0.4s) so the peak difference is clearly visible
+        if done1 and done2 and done3:
             for _ in range(12):
                 frames.append(np.array(pil_img))
             break
@@ -1305,68 +1560,85 @@ def evaluate_500hz_jump_experiment(
     T_act_n2_arr = np.array(T_act_neg2_500)
     T_LV_p2_arr = np.array(T_LV_pos2_500)
     T_LV_n2_arr = np.array(T_LV_neg2_500)
+
+    tau3_pd_arr = np.array(tau3_pd_500)
+    tau3_clamped_arr = np.array(tau3_clamped_500)
+    Tp3_arr = np.array(T_pos3_500)
+    Tn3_arr = np.array(T_neg3_500)
+
     ex1_arr = np.array(ex1_500)
     ex2_arr = np.array(ex2_500)
+    ex3_arr = np.array(ex3_500)
 
     valid2 = ~np.isnan(ex2_arr)
-    clamped_mask = np.abs(tau2_pd_arr[valid2] - tau2_clamped_arr[valid2]) > 1e-3
-    clamp_pct_per_joint = clamped_mask.mean(axis=0) * 100.0
+    clamped_mask2 = np.abs(tau2_pd_arr[valid2] - tau2_clamped_arr[valid2]) > 1e-3
+    clamp_pct_per_joint2 = clamped_mask2.mean(axis=0) * 100.0
+
+    valid3 = ~np.isnan(ex3_arr)
+    clamped_mask3 = np.abs(tau3_pd_arr[valid3] - tau3_clamped_arr[valid3]) > 1e-3
+    clamp_pct_per_joint3 = clamped_mask3.mean(axis=0) * 100.0
+
     joints = ["Lumbar", "Hip (L)", "Knee (L)", "Ankle (L)", "Hip (R)", "Knee (R)", "Ankle (R)"]
 
     dz1_cm = (env1.max_z - env1.z_stand) * 100.0
     dz2_cm = (env2.max_z - env2.z_stand) * 100.0
+    dz3_cm = (env3.max_z - env3.z_stand) * 100.0
 
     print(f"\n[DONE] Saved Overlay GIF: {gif_path}")
-    print(f"  Mode 1 (Unlimited PD): Steps to Apex = {step1_survived} ({step1_survived*0.02:.2f}s) | Fell = {fell1} | Crouch min_z = {env1.min_z:.2f}m | Peak z = {env1.max_z:.2f}m (+{dz1_cm:.1f} cm) | Foot Clear = {env1.max_foot_z*100:.1f} cm | Peak Vz = {env1.max_vz:.2f} m/s | Mean Excess = {np.nanmean(ex1_arr):.2f} N*m | Max Excess = {np.nanmax(ex1_arr):.2f} N*m")
-    print(f"  Mode 2 (MTG Clamped) : Steps to Apex = {step2_survived} ({step2_survived*0.02:.2f}s) | Fell = {fell2} | Crouch min_z = {env2.min_z:.2f}m | Peak z = {env2.max_z:.2f}m (+{dz2_cm:.1f} cm) | Foot Clear = {env2.max_foot_z*100:.1f} cm | Peak Vz = {env2.max_vz:.2f} m/s | Mean Excess = {np.nanmean(ex2_arr):.6f} N*m | Max Excess = {np.nanmax(ex2_arr):.6f} N*m")
-    print("  Active Clamping Frequency per Joint in Mode 2 (% of 500 Hz sub-steps where |tau_act_des| > a(t)*T_LV):")
+    print(f"  Mode 1 (Unlimited PD)            : Steps = {step1_survived} ({step1_survived*0.02:.2f}s) | Fell = {fell1} | Crouch min_z = {env1.min_z:.2f}m | Peak z = {env1.max_z:.2f}m (+{dz1_cm:.1f} cm) | Foot Clear = {env1.max_foot_z*100:.1f} cm | Peak Vz = {env1.max_vz:.2f} m/s | Mean Excess = {np.nanmean(ex1_arr):.2f} N*m | Max Excess = {np.nanmax(ex1_arr):.2f} N*m")
+    print(f"  Mode 2 (Unscaled Young Adult MTG): Steps = {step2_survived} ({step2_survived*0.02:.2f}s) | Fell = {fell2} | Crouch min_z = {env2.min_z:.2f}m | Peak z = {env2.max_z:.2f}m (+{dz2_cm:.1f} cm) | Foot Clear = {env2.max_foot_z*100:.1f} cm | Peak Vz = {env2.max_vz:.2f} m/s | Mean Excess = {np.nanmean(ex2_arr):.6f} N*m | Max Excess = {np.nanmax(ex2_arr):.6f} N*m")
+    print(f"  Mode 2 (Personalized Elderly MTG): Steps = {step3_survived} ({step3_survived*0.02:.2f}s) | Fell = {fell3} | Crouch min_z = {env3.min_z:.2f}m | Peak z = {env3.max_z:.2f}m (+{dz3_cm:.1f} cm) | Foot Clear = {env3.max_foot_z*100:.1f} cm | Peak Vz = {env3.max_vz:.2f} m/s | Mean Excess = {np.nanmean(ex3_arr):.6f} N*m | Max Excess = {np.nanmax(ex3_arr):.6f} N*m")
+    print(f"  Mode 2 (Elderly Zero-Shot Policy): Peak z = {env_zs.max_z:.2f}m (+{dz_zeroshot_cm:.1f} cm) | Foot Clear = {env_zs.max_foot_z*100:.1f} cm | Peak Vz = {env_zs.max_vz:.2f} m/s")
+    print("  Active Clamping Frequency per Joint (Young MTG vs Elderly Personalized MTG):")
     for j_idx, j_name in enumerate(joints):
-        max_clip = np.nanmax(np.abs(tau2_pd_arr[:, j_idx] - tau2_clamped_arr[:, j_idx]))
-        max_pass = np.nanmax(np.abs(tau2_pass_arr[:, j_idx]))
-        print(f"    - {j_name:<10}: {clamp_pct_per_joint[j_idx]:5.1f}% of sub-steps clamped (Max clipped: {max_clip:6.1f} N*m | Max |tau_pass|: {max_pass:5.1f} N*m)")
+        max_clip2 = np.nanmax(np.abs(tau2_pd_arr[:, j_idx] - tau2_clamped_arr[:, j_idx]))
+        max_clip3 = np.nanmax(np.abs(tau3_pd_arr[:, j_idx] - tau3_clamped_arr[:, j_idx]))
+        print(f"    - {j_name:<10}: Young Clamped {clamp_pct_per_joint2[j_idx]:5.1f}% (Max clip: {max_clip2:5.1f} N*m) | Elderly Clamped {clamp_pct_per_joint3[j_idx]:5.1f}% (Max clip: {max_clip3:5.1f} N*m)")
 
     fig, axes = plt.subplots(4, 2, figsize=(16, 13.5), sharex=True)
     axes = axes.flatten()
 
     for j in range(7):
         ax = axes[j]
-        ax.plot(t_arr, T_LV_p2_arr[:, j], color="gray", linestyle="--", lw=0.8, alpha=0.45, zorder=1, label="Full-Activation Capacity T_max*f_L*f_V (a=1)")
+        ax.plot(t_arr, T_LV_p2_arr[:, j], color="gray", linestyle="--", lw=0.8, alpha=0.45, zorder=1, label="Young Full-Activation T_LV (a=1)")
         ax.plot(t_arr, -T_LV_n2_arr[:, j], color="gray", linestyle="--", lw=0.8, alpha=0.45, zorder=1)
-        ax.fill_between(t_arr, -T_act_n2_arr[:, j], T_act_p2_arr[:, j], color="lightgray", alpha=0.60, label="Active Clamp Envelope [±a(t)*T_max*f_L*f_V]")
-        ax.plot(t_arr, Tp2_arr[:, j], "k:", lw=1.2, alpha=0.9, zorder=5, label="Total MTG Limit [±a(t)*T_LV + tau_passive]")
-        ax.plot(t_arr, -Tn2_arr[:, j], "k:", lw=1.2, alpha=0.9, zorder=5)
+        ax.fill_between(t_arr, -T_act_n2_arr[:, j], T_act_p2_arr[:, j], color="lightgray", alpha=0.55, label="Young Active Clamp Envelope [±a(t)*T_LV]")
+        ax.plot(t_arr, Tp2_arr[:, j], "k:", lw=1.1, alpha=0.85, zorder=5, label="Young Total MTG Limit")
+        ax.plot(t_arr, -Tn2_arr[:, j], "k:", lw=1.1, alpha=0.85, zorder=5)
+        ax.plot(t_arr, Tp3_arr[:, j], color="purple", linestyle=":", lw=1.2, alpha=0.85, zorder=5, label="Elderly Total MTG Limit")
+        ax.plot(t_arr, -Tn3_arr[:, j], color="purple", linestyle=":", lw=1.2, alpha=0.85, zorder=5)
 
-        ax.plot(t_arr, tau1_arr[:, j], "b--", lw=1.2, alpha=0.70, zorder=2, label="Mode 1 Applied Torque (Unlimited PD)")
-        ax.plot(t_arr, tau2_pd_arr[:, j], color="darkorange", linestyle=":", lw=1.1, alpha=0.75, zorder=3, label="Mode 2 Unclamped PD Demand")
-        ax.plot(t_arr, tau2_pass_arr[:, j], color="seagreen", linestyle="-", lw=1.2, alpha=0.85, zorder=3, label="Mode 2 Passive Torque tau_passive(q)")
-        ax.plot(t_arr, tau2_clamped_arr[:, j], "r-", lw=1.8, zorder=4, label="Mode 2 Total Torque [tau_active + tau_passive]")
+        ax.plot(t_arr, tau1_arr[:, j], "b--", lw=1.2, alpha=0.65, zorder=2, label="Mode 1 Unlimited PD Torque")
+        ax.plot(t_arr, tau2_clamped_arr[:, j], "r-", lw=1.8, zorder=4, label="Mode 2 Young Adult MTG Torque")
+        ax.plot(t_arr, tau3_clamped_arr[:, j], color="purple", linestyle="-", lw=1.8, zorder=4, label="Mode 2 Personalized Elderly MTG Torque")
 
         ax.set_title(
-            f"{joints[j]} Torque — {exp_title} (Clamped {clamp_pct_per_joint[j]:.1f}% of sub-steps)",
-            fontsize=10.5, fontweight="bold"
+            f"{joints[j]} Torque — Young Clamped {clamp_pct_per_joint2[j]:.1f}% | Elderly Clamped {clamp_pct_per_joint3[j]:.1f}%",
+            fontsize=10.0, fontweight="bold"
         )
         ax.set_ylabel("Torque (N*m)")
         ax.grid(True, alpha=0.3)
         if j == 0:
-            ax.legend(loc="upper right", fontsize=6.5)
+            ax.legend(loc="upper right", fontsize=6.2)
 
     ax8 = axes[7]
     ax8_twin = ax8.twinx()
-    ax8.plot(t_arr, z1_500, "b--", lw=1.8, label=f"Mode 1 Pelvis Height (Peak {env1.max_z:.2f}m, +{dz1_cm:.1f}cm)")
-    ax8.plot(t_arr, z2_500, "r-", lw=2.0, label=f"Mode 2 Pelvis Height (Peak {env2.max_z:.2f}m, +{dz2_cm:.1f}cm)")
-    ax8.axhline(env1.z_stand, color="green", linestyle=":", lw=1.5, label=f"Standing Height ({env1.z_stand:.2f}m)")
+    ax8.plot(t_arr, z1_500, "b--", lw=1.8, label=f"Mode 1 Unlimited (Peak {env1.max_z:.2f}m, +{dz1_cm:.1f}cm)")
+    ax8.plot(t_arr, z2_500, "r-", lw=2.0, label=f"Mode 2 Young MTG (Peak {env2.max_z:.2f}m, +{dz2_cm:.1f}cm)")
+    ax8.plot(t_arr, z3_500, color="purple", linestyle="-", lw=2.0, label=f"Mode 2 Elderly MTG (Peak {env3.max_z:.2f}m, +{dz3_cm:.1f}cm)")
+    ax8.axhline(env1.z_stand, color="green", linestyle=":", lw=1.4, label=f"Standing Height ({env1.z_stand:.2f}m)")
     ax8.set_ylabel("Pelvis Height z (m)", color="black")
     ax8.set_ylim(0.55, max(1.45, env1.max_z + 0.15))
 
-    ax8_twin.plot(t_arr, ex1_arr, color="darkorange", linestyle="-", lw=1.4, alpha=0.8, label="Mode 1 Exceeded Torque (N*m)")
-    ax8_twin.plot(t_arr, ex2_arr, color="darkred", linestyle="-", lw=2.0, label="Mode 2 Exceeded Torque (= 0.00 N*m)")
+    ax8_twin.plot(t_arr, ex1_arr, color="darkorange", linestyle="-", lw=1.3, alpha=0.75, label="Mode 1 Exceeded Torque (N*m)")
+    ax8_twin.plot(t_arr, ex2_arr, color="darkred", linestyle="-", lw=1.8, label="Young/Elderly MTG Exceeded (= 0.00 N*m)")
     ax8_twin.set_ylabel("500 Hz Exceeded Torque (N*m)", color="darkorange")
 
     lines1, labels1 = ax8.get_legend_handles_labels()
     lines2, labels2 = ax8_twin.get_legend_handles_labels()
-    ax8.legend(lines1 + lines2, labels1 + labels2, loc="upper left", fontsize=7.0)
+    ax8.legend(lines1 + lines2, labels1 + labels2, loc="upper left", fontsize=6.5)
 
-    ax8.set_title(f"{exp_title}: Pelvis Trajectory z(t) & 500 Hz Exceeded Torque", fontsize=10.5, fontweight="bold")
+    ax8.set_title(f"{exp_title}: 3-Model Pelvis Height z(t) & 500 Hz Exceeded Torque", fontsize=10.2, fontweight="bold")
     ax8.set_xlabel("Time (s)")
     ax8.grid(True, alpha=0.3)
 
@@ -1374,6 +1646,18 @@ def evaluate_500hz_jump_experiment(
     plt.savefig(plot_path, dpi=200)
     plt.close()
     print(f"[DONE] Saved Torque & Limits Plot: {plot_path}")
+
+    plot_elderly_mtg_personalization(
+        personalization_plot_path=personalization_plot_path,
+        t_arr=t_arr,
+        z1_500=z1_500,
+        z2_500=z2_500,
+        z3_500=z3_500,
+        env1=env1,
+        env2=env2,
+        env3=env3,
+        dz_zeroshot_cm=dz_zeroshot_cm
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -1513,6 +1797,7 @@ def main():
 
     ckpt_jump_m1 = "checkpoints/exp4_jump_mode1.pt"
     ckpt_jump_m2 = "checkpoints/exp4_jump_mode2.pt"
+    ckpt_jump_m2_elderly = "checkpoints/exp4_jump_mode2_elderly.pt"
 
     policy_jump_m1 = make_jump_policy(obs_dim=64, device=device)
     if os.path.exists(ckpt_jump_m1):
@@ -1526,7 +1811,7 @@ def main():
     policy_jump_m2 = make_jump_policy(obs_dim=64, device=device)
     if os.path.exists(ckpt_jump_m2):
         policy_jump_m2.load_state_dict(torch.load(ckpt_jump_m2, map_location=device))
-        print(f"  [Loaded Exp 4 Mode 2 from {ckpt_jump_m2}]")
+        print(f"  [Loaded Exp 4 Mode 2 (Unscaled Young MTG) from {ckpt_jump_m2}]")
     else:
         policy_jump_m2.load_state_dict(policy_jump_m1.state_dict())
         with torch.no_grad():
@@ -1539,12 +1824,30 @@ def main():
         policy_jump_m2 = train_ppo_loop(env_j2_hard, policy_jump_m2, num_iters=35, lr=1.5e-4, label="Exp4-Jump-M2-Hard")
         torch.save(policy_jump_m2.state_dict(), ckpt_jump_m2)
 
+    policy_jump_m2_elderly = make_jump_policy(obs_dim=64, device=device)
+    if os.path.exists(ckpt_jump_m2_elderly):
+        policy_jump_m2_elderly.load_state_dict(torch.load(ckpt_jump_m2_elderly, map_location=device))
+        print(f"  [Loaded Exp 4 Mode 2 (Personalized Elderly MTG) from {ckpt_jump_m2_elderly}]")
+    else:
+        policy_jump_m2_elderly.load_state_dict(policy_jump_m2.state_dict())
+        with torch.no_grad():
+            policy_jump_m2_elderly.log_std.clamp_(min=-1.45, max=-1.10)
+        print("  --- Exp 4 Mode 2 Elderly Phase 1: Soft Elderly MTG Penalty (10 iters) ---")
+        env_je_soft = VectorJumpEnv(num_envs=64, mode="mode2_elderly", mtg_phase="soft", max_steps=60)
+        policy_jump_m2_elderly = train_ppo_loop(env_je_soft, policy_jump_m2_elderly, num_iters=10, lr=1.2e-4, label="Exp4-Elderly-Soft")
+        print("  --- Exp 4 Mode 2 Elderly Phase 2: Hard 500 Hz Elderly MTG Clamping (25 iters) ---")
+        env_je_hard = VectorJumpEnv(num_envs=64, mode="mode2_elderly", mtg_phase="hard", max_steps=60)
+        policy_jump_m2_elderly = train_ppo_loop(env_je_hard, policy_jump_m2_elderly, num_iters=25, lr=1.0e-4, label="Exp4-Elderly-Hard")
+        torch.save(policy_jump_m2_elderly.state_dict(), ckpt_jump_m2_elderly)
+
     evaluate_500hz_jump_experiment(
         exp_title="EXP 4: MAX HEIGHT JUMP",
         policy1=policy_jump_m1,
         policy2=policy_jump_m2,
+        policy2_elderly=policy_jump_m2_elderly,
         gif_path="renders/exp4_max_jump_overlay.gif",
         plot_path="renders/exp4_max_jump_torque_limits.png",
+        personalization_plot_path="renders/exp4_elderly_mtg_personalization.png",
         max_steps=60
     )
 

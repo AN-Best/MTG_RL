@@ -13,12 +13,12 @@ class BipedEnv:
     3. 'mtg': Full Hill-type Muscle Torque Generator with 1st-order activation ODEs,
               force-length, force-velocity, and sensory-motor reflex dynamics.
     """
-    def __init__(self, actuator_type="ideal_unlimited", device="cpu"):
+    def __init__(self, actuator_type="ideal_unlimited", device="cpu", xml_filename="biped_10dof.xml"):
         self.actuator_type = actuator_type
         self.device = torch.device(device)
         
         # Load MuJoCo XML from workspace root
-        xml_path = os.path.join(os.path.dirname(__file__), "biped_10dof.xml")
+        xml_path = os.path.join(os.path.dirname(__file__), xml_filename)
         self.model = mujoco.MjModel.from_xml_path(xml_path)
         self.data = mujoco.MjData(self.model)
         
@@ -83,7 +83,7 @@ class BipedEnv:
         if isinstance(q_des, np.ndarray) and hasattr(self.actuator, "compute_torques_np"):
             q_j_np = self.data.qpos[3:10].astype(np.float32)
             u_j_np = self.data.qvel[3:10].astype(np.float32)
-            if self.actuator.actuator_type == "mtg_clamped":
+            if self.actuator.actuator_type in ["mtg_clamped", "mtg_elderly"]:
                 tau_np = self.actuator.compute_torques_np(q_j_np, u_j_np, q_des, u_des=u_des, dt_sim=dt_sim)
             else:
                 tau_np = self.actuator.compute_torques_np(q_j_np, u_j_np, q_des, u_des=u_des)

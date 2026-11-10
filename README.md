@@ -1,6 +1,6 @@
 # 10-DoF Musculoskeletal Biped — MuJoCo Physics & 500 Hz MTG Actuators
 
-A **MuJoCo + PyTorch** reinforcement learning framework for a 10-Degree-of-Freedom (10-DoF) sagittal-plane musculoskeletal biped comparing **Unconstrained Ideal PD Control (Mode 1)** against **Biologically Clamped Hill-Type Muscle Torque Generators (Mode 2 — Unscaled Young Adult & Personalized Elderly Adult)** across human walking (`1.25 m/s`), slow running (`2.0 m/s`), fast sprinting (`5.0 m/s`), and **pure RL motion generation for a Maximum Height Vertical Jump** (no reference trial to imitate).
+A **MuJoCo + PyTorch** reinforcement learning framework for a 10-Degree-of-Freedom (10-DoF) sagittal-plane musculoskeletal biped comparing **Unconstrained Ideal PD Control (Mode 1)** against **Biologically Clamped Hill-Type Muscle Torque Generators (Mode 2 — Unscaled Young Adult & Personalized Elderly Adult)** across human walking (`1.25 m/s`), slow running (`2.0 m/s`), fast sprinting (`5.0 m/s`), **pure RL motion generation for a Maximum Height Vertical Jump**, and **Sit-to-Stand (STS) imitation from a physical chair** (comparing the Healthy Unscaled models against the Walking-Scaled Elderly Adult MTG model).
 
 ---
 
@@ -9,8 +9,10 @@ A **MuJoCo + PyTorch** reinforcement learning framework for a 10-Degree-of-Freed
 ```text
 MTG_RL/
 ├── biped_10dof.xml                         # 10-DoF MuJoCo musculoskeletal biped model (500 Hz, dt = 0.002s)
+├── biped_sts_chair.xml                     # 10-DoF MuJoCo biped + physical chair for Sit-to-Stand contact physics
 ├── biped_overlay.xml                       # Dual-biped overlay scene (Mode 1 Ghost vs Mode 2 Solid)
-├── biped_overlay_jump.xml                  # 3-biped side-by-side scene (Mode 1 vs Young MTG vs Elderly MTG)
+├── biped_overlay_jump.xml                  # 3-biped side-by-side scene for Max Jump (Mode 1 vs Young MTG vs Elderly MTG)
+├── biped_overlay_sts.xml                   # 3-biped + 3-chair side-by-side scene for Sit-to-Stand comparison
 ├── Biped_Actuators.py                      # Mode 1 (Unlimited PD), Mode 2 (Young MTG), & Mode 2 Elderly MTG
 ├── Biped_Env.py                            # Core 500 Hz MuJoCo simulation interface
 ├── Stable_Motion_Tracker.py                # Gated Residual Actor-Critic policy & two-phase MTG curriculum env
@@ -29,9 +31,13 @@ MTG_RL/
 │       ├── population_features.csv         # Per-subject demographic, kinematic, and kinetic features
 │       └── population_trajectories.npz     # Normalized gait cycle angle & moment trajectories
 ├── motions/
-│   ├── Arnold2013Walking_subject01_walk2.npz  # Experiment 1: Walking reference (~1.25 m/s)
-│   ├── Hamner2013_Run20_cycle.npz             # Experiment 2: Slow running reference (2.0 m/s)
-│   └── Hamner2013_Run50_cycle.npz             # Experiment 3: Fast running reference (5.0 m/s)
+│   ├── Arnold2013Walking_subject01_walk2.npz       # Experiment 1: Walking reference (~1.25 m/s)
+│   ├── Hamner2013_Run20_cycle.npz                  # Experiment 2: Slow running reference (2.0 m/s)
+│   ├── Hamner2013_Run50_cycle.npz                  # Experiment 3: Fast running reference (5.0 m/s)
+│   ├── Kumar2022_SitToStand.npz                    # Experiment 5: Healthy young adult Sit-to-Stand (500 Hz, 1.50 s)
+│   ├── Kumar2022_HealthyYoung_SitToStand_raw.sto   # Raw OpenSim Healthy Young STS kinematics (Kumar et al. 2022)
+│   ├── Kumar2022_STS_00pct_ID.sto                  # OpenSim Inverse Dynamics joint moments for STS trial
+│   └── Kumar2022_STS_00pct_grf.mot                 # OpenSim Ground & Chair Seat Reaction Forces for STS trial
 ├── checkpoints/
 │   ├── exp1_walk_mode1.pt                  # Exp 1 Walking — Mode 1 (Unlimited PD)
 │   ├── exp1_walk_mode2.pt                  # Exp 1 Walking — Mode 2 (MTG Clamped)
@@ -41,7 +47,10 @@ MTG_RL/
 │   ├── exp3_run50_mode2.pt                 # Exp 3 Fast Running (5 m/s) — Mode 2 (MTG Clamped)
 │   ├── exp4_jump_mode1.pt                  # Exp 4 Max Height Jump (Pure RL) — Mode 1 (Unlimited PD)
 │   ├── exp4_jump_mode2.pt                  # Exp 4 Max Height Jump (Pure RL) — Mode 2 (Unscaled Young MTG)
-│   └── exp4_jump_mode2_elderly.pt          # Exp 4 Max Height Jump (Pure RL) — Mode 2 (Personalized Elderly MTG)
+│   ├── exp4_jump_mode2_elderly.pt          # Exp 4 Max Height Jump (Pure RL) — Mode 2 (Personalized Elderly MTG)
+│   ├── exp5_sts_mode1.pt                   # Exp 5 Sit-to-Stand (Chair) — Mode 1 (Healthy Unscaled PD)
+│   ├── exp5_sts_mode2_young.pt             # Exp 5 Sit-to-Stand (Chair) — Mode 2 (Healthy Young Unscaled MTG)
+│   └── exp5_sts_mode2_elderly.pt           # Exp 5 Sit-to-Stand (Chair) — Mode 2 (Walking-Scaled Elderly MTG)
 ├── renders/
 │   ├── exp1_walking_overlay.gif
 │   ├── exp1_walking_torque_limits.png
@@ -51,7 +60,9 @@ MTG_RL/
 │   ├── exp3_fast_running_5ms_torque_limits.png
 │   ├── exp4_max_jump_overlay.gif
 │   ├── exp4_max_jump_torque_limits.png
-│   └── exp4_elderly_mtg_personalization.png
+│   ├── exp4_elderly_mtg_personalization.png
+│   ├── exp5_sit_to_stand_overlay.gif
+│   └── exp5_sit_to_stand_torque_limits.png
 └── requirements.txt
 ```
 
@@ -121,7 +132,7 @@ In addition, [`ElderlyMTGClampedActuator`](file:///c:/Users/anbes/OneDrive/Deskt
 
 ## 📊 Experimental Results (`500 Hz` Verification)
 
-| Experiment | Reference Trial | Mode | Survival | Distance / Apex Height | Speed / Peak $V_z$ | Mean `500 Hz` Exceeded Torque | Max `500 Hz` Exceeded Torque |
+| Experiment | Reference Trial | Mode | Survival | Distance / Height / End $z$ | Speed / Peak $V_z$ / Tracking | Mean `500 Hz` Exceeded Torque | Max `500 Hz` Exceeded Torque |
 | :--- | :--- | :--- | :---: | :---: | :---: | :---: | :---: |
 | **1. Walking** (`1.25 m/s`) | `Arnold2013Walking_subject01_walk2.npz` | **Mode 1** (Unlimited) | `180/180` (`Fell=False`) | `5.26 m` | `1.46 m/s` | `22.22 N*m` | `143.79 N*m` |
 | | | **Mode 2** (MTG Clamped) | `180/180` (`Fell=False`) | `4.40 m` | `1.22 m/s` | **`0.000000 N*m`** | **`0.000000 N*m`** |
@@ -133,6 +144,10 @@ In addition, [`ElderlyMTGClampedActuator`](file:///c:/Users/anbes/OneDrive/Deskt
 | | | **Mode 2** (Unscaled Young MTG) | `32/32` (`Apex, Fell=False`) | `Peak z = 1.10 m` (**`+18.3 cm`**) | `Peak Vz = 2.22 m/s` | **`0.000000 N*m`** | **`0.000000 N*m`** |
 | | | **Mode 2** (Personalized Elderly MTG — RL) | `30/30` (`Apex, Fell=False`) | `Peak z = 1.03 m` (**`+11.2 cm`**) | `Peak Vz = 1.73 m/s` | **`0.000000 N*m`** | **`0.000000 N*m`** |
 | | | **Mode 2** (Elderly MTG — Zero-Shot Young Policy) | `30/30` (`Apex, Fell=False`) | `Peak z = 0.99 m` (**`+7.1 cm`**) | `Peak Vz = 1.76 m/s` | **`0.000000 N*m`** | **`0.000000 N*m`** |
+| **5. Sit-to-Stand** (Chair Trial) | `Kumar2022_SitToStand.npz` | **Mode 1** (Healthy Unscaled PD) | `75/75` (`Fell=False`) | `0.623 m` $\rightarrow$ **`0.918 m`** | `RMSE = 3.14°`, `Pitch MAE = 2.57°` | `36.45 N*m` | `169.18 N*m` |
+| | | **Mode 2** (Healthy Young Unscaled MTG) | `75/75` (`Fell=False`) | `0.623 m` $\rightarrow$ **`0.915 m`** | `RMSE = 3.33°`, `Pitch MAE = 4.73°` | **`0.000000 N*m`** | **`0.000000 N*m`** |
+| | | **Mode 2** (Elderly Walking-Scaled MTG — RL) | `75/75` (`Fell=False`) | `0.623 m` $\rightarrow$ **`0.917 m`** | `RMSE = 3.44°`, `Pitch MAE = 7.50°` | **`0.000000 N*m`** | **`0.000000 N*m`** |
+| | | **Mode 2** (Elderly MTG — Zero-Shot Young Policy) | `75/75` (`Fell=False`) | `0.623 m` $\rightarrow$ **`0.912 m`** | `RMSE = 4.46°`, `Pitch MAE = 11.34°` | **`0.000000 N*m`** | **`0.000000 N*m`** |
 
 ---
 
@@ -187,9 +202,33 @@ With **no reference trial to imitate**, the RL policy discovers an injury-free c
 
 ---
 
+## 🪑 Experiment 5: Sit-to-Stand Imitation on a Physical Chair — Healthy Unscaled (Mode 1 & Mode 2 Young) vs. Walking-Scaled Elderly Adult MTG
+
+In **Experiment 5**, we evaluate **Sit-to-Stand (STS)** motion imitation using an open-source OpenSim healthy young adult trial from **Kumar, Yoshiike, & Shibata (2022)** (*Frontiers in Bioengineering and Biotechnology*, `ShibataLab/PredictiveSTS` `00pct` baseline on the Stanford NMBL `LaiArnold2017` lower-limb musculoskeletal model), mapped to our 500 Hz 10-DoF model in [`motions/Kumar2022_SitToStand.npz`](file:///c:/Users/anbes/OneDrive/Desktop/MTG_RL/motions/Kumar2022_SitToStand.npz) (`1.50 s`, rising from seated `z = 0.623 m` to standing `z = 0.919 m`).
+
+### Physical Chair MuJoCo Environment (`biped_sts_chair.xml` & `biped_overlay_sts.xml`)
+- [`biped_sts_chair.xml`](file:///c:/Users/anbes/OneDrive/Desktop/MTG_RL/biped_sts_chair.xml) adds a physical `chair` body (`chair_seat` top surface at `z = 0.573 m`, `chair_front_lip`, `chair_backrest`, and four chair legs) with dedicated seat-to-pelvis contact physics (`contype="2" conaffinity="4"`).
+- At the initial seated posture (`t = 0.0 s`, `q_hip = -77.3°`, `q_knee = -87.7°`, `q_ankle = +22.9°`), the physical chair seat supports `~358–560 N` of vertical contact force while the feet support the remaining body weight on the floor. As the biped pitches its trunk forward and extends the hips and knees (`t = 0.45–0.65 s`), the chair contact force smoothly unloads to `0 N` at seat-off.
+
+### Biomechanical Comparison: Healthy Young Unscaled vs. Walking-Scaled Elderly Adult MTG
+1. **Mode 1 (Healthy Unscaled — Ideal Unlimited PD, Left in GIF, Cyan)**:
+   - Tracks the healthy young adult Sit-to-Stand reference with `3.14°` joint RMSE, `2.57°` trunk pitch MAE, and final standing height `z = 0.918 m`, but violates biological Hill-type MTG limits by an average of `36.45 N*m` (peaking at `169.18 N*m` during seat-off).
+2. **Mode 2 (Healthy Young Adult — Unscaled 500 Hz Clamped MTG, Center in GIF, Blue/Orange/Green)**:
+   - Rises smoothly off the physical chair to `z = 0.915 m` (`3.33°` joint RMSE, `4.73°` pitch MAE) with **`0.000000 N*m`** torque violation while active clamping engages on `56.1–64.4%` of hip sub-steps (`96.9 N*m` max clipped) and `58.3–60.0%` of knee sub-steps during seat-off (`t = 0.45–0.85 s`).
+3. **Mode 2 (Healthy Elderly Adult — Walking-Scaled 500 Hz Clamped MTG, Right in GIF, Purple/Crimson/Gold)**:
+   - Uses the [`ElderlyMTGClampedActuator`](file:///c:/Users/anbes/OneDrive/Desktop/MTG_RL/Biped_Actuators.py) personalized from the **Elderly Walking Trial Cohort** (`s^s = 0.659` knee extension, `0.792` hip extension, `0.767` ankle plantarflexion; narrowed active torque-angle width `s^A = 0.92–0.95`).
+   - Because deep seated flexion (`q_hip = -1.35 rad`, `q_knee = -1.53 rad`) lies on the descending limb of the narrowed elderly active torque-angle curve $f_L(q; s^A)$, available active knee extension torque at seat-off is **`-41.9%` lower** (`114.8 N*m` vs `197.6 N*m`) and active hip extension torque is **`-31.7%` lower** (`73.0 N*m` vs `106.9 N*m`) than in the young adult model.
+   - **Zero-Shot Transfer vs. Adapted Elderly Strategy**: Executing the Young Adult STS policy zero-shot on the Walking-Scaled Elderly MTG body causes substantial forward trunk lag (`Pitch MAE = 11.34°`, `Pose RMSE = 4.46°`). When adapted with RL on the Elderly MTG model (`checkpoints/exp5_sts_mode2_elderly.pt`), the elderly biped successfully completes the Sit-to-Stand transition (`75/75` steps, `End z = 0.917 m`, `Pose RMSE = 3.44°`, **`0.000000 N*m`** violation) by employing the classic clinical **"momentum-transfer" strategy** — pitching the torso further forward (`Pitch MAE = 7.50°` vs `2.57°` in Mode 1 and `4.73°` in Young MTG, clipping up to `184.4 N*m` of hip demand) to bring the center of mass over the feet before extending the weakened knees.
+
+![Experiment 5 Sit-to-Stand 3-Model Side-by-Side Chair Overlay](renders/exp5_sit_to_stand_overlay.gif)
+
+![Experiment 5 Sit-to-Stand Torque and Limits](renders/exp5_sit_to_stand_torque_limits.png)
+
+---
+
 ## 🚀 Running the Suite
 
-To run or re-render all four experiments (loads existing checkpoints in `checkpoints/` or trains from scratch if removed):
+To run or re-render all five experiments (loads existing checkpoints in `checkpoints/` or trains from scratch if removed):
 
 ```bash
 python run_all_experiments.py

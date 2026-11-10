@@ -1,0 +1,128 @@
+<mujoco model="biped_sts_chair">
+  <compiler angle="radian" coordinate="local" inertiafromgeom="false" balanceinertia="true"/>
+  <option timestep="0.002" gravity="0 0 -9.81"/>
+
+  <visual>
+    <headlight ambient="0.5 0.5 0.5" diffuse="0.8 0.8 0.8" specular="0.2 0.2 0.2"/>
+    <map znear="0.01"/>
+    <quality shadowsize="2048" offsamples="4"/>
+    <global offwidth="1280" offheight="720"/>
+  </visual>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.92 0.95 1.0" rgb2="0.65 0.75 0.88" width="512" height="512"/>
+    <texture name="grid" type="2d" builtin="checker" width="512" height="512" rgb1="0.95 0.95 0.95" rgb2="0.82 0.82 0.82"/>
+    <material name="grid_mat" texture="grid" texrepeat="25 25" reflectance="0.15"/>
+    <material name="chair_wood" rgba="0.46 0.31 0.18 1.0" specular="0.2" shininess="0.3"/>
+    <material name="chair_frame" rgba="0.28 0.30 0.34 1.0" specular="0.4" shininess="0.5"/>
+  </asset>
+
+  <default>
+    <joint damping="2.0" armature="0.01"/>
+    <geom friction="1.2 0.005 0.0001" solimp="0.9 0.95 0.001" solref="0.02 1"/>
+  </default>
+
+  <worldbody>
+    <!-- Ground Plane at z = 0 (bitmask 1) -->
+    <geom name="floor" type="plane" pos="0 0 0" size="100 100 0.1" material="grid_mat" contype="1" conaffinity="1"/>
+
+    <!-- Physical Sit-to-Stand Chair (bitmask 2/4 collides cleanly with pelvis_geom) -->
+    <body name="chair" pos="0 0 0">
+      <!-- Seat surface top at z = 0.573 m, spanning x in [-0.46, -0.22] m directly under seated pelvis (x = -0.292 m) -->
+      <geom name="chair_seat" type="box" pos="-0.34 0 0.553" size="0.12 0.22 0.020"
+            material="chair_wood" contype="2" conaffinity="4" friction="1.8 0.02 0.001"/>
+      <!-- Rounded front lip of chair seat at x = -0.22 m -->
+      <geom name="chair_front_lip" type="capsule" fromto="-0.22 -0.20 0.553 -0.22 0.20 0.553" size="0.020"
+            material="chair_wood" contype="2" conaffinity="4" friction="1.8 0.02 0.001"/>
+      <!-- Backrest support at x = -0.45 m -->
+      <geom name="chair_backrest" type="box" pos="-0.45 0 0.78" size="0.015 0.20 0.14"
+            material="chair_wood" contype="2" conaffinity="4"/>
+      <!-- 4 Chair Legs & Back Posts (visual) -->
+      <geom name="chair_leg_fl" type="capsule" fromto="-0.23  0.19 0.0 -0.23  0.19 0.54" size="0.016" material="chair_frame" contype="0" conaffinity="0"/>
+      <geom name="chair_leg_fr" type="capsule" fromto="-0.23 -0.19 0.0 -0.23 -0.19 0.54" size="0.016" material="chair_frame" contype="0" conaffinity="0"/>
+      <geom name="chair_leg_bl" type="capsule" fromto="-0.45  0.19 0.0 -0.45  0.19 0.90" size="0.016" material="chair_frame" contype="0" conaffinity="0"/>
+      <geom name="chair_leg_br" type="capsule" fromto="-0.45 -0.19 0.0 -0.45 -0.19 0.90" size="0.016" material="chair_frame" contype="0" conaffinity="0"/>
+    </body>
+
+    <!-- Floating Pelvis Base (2D Planar: X slide, Z slide, Y-pitch hinge) -->
+    <body name="pelvis" pos="0 0 0">
+      <joint name="root_x" type="slide" axis="1 0 0" damping="0" armature="0"/>
+      <joint name="root_z" type="slide" axis="0 0 1" damping="0" armature="0"/>
+      <joint name="root_p" type="hinge" axis="0 1 0" damping="0" armature="0"/>
+      <inertial pos="0 0 0.04" mass="10.65" diaginertia="0.06 0.10 0.06"/>
+      <geom name="pelvis_geom" type="capsule" fromto="0 0 0 0 0 0.10" size="0.05" rgba="0.12 0.47 0.71 1" contype="4" conaffinity="2"/>
+
+      <!-- Lumbar Joint -> Upper Torso -->
+      <body name="torso" pos="0 0 0.10">
+        <joint name="q_lum" type="hinge" axis="0 1 0" range="-0.469 0.620"/>
+        <inertial pos="0 0 0.2739" mass="25.0" diaginertia="0.25 0.4377 0.25"/>
+        <geom name="torso_geom" type="capsule" fromto="0 0 0 0 0 0.4725" size="0.06" rgba="0.55 0.34 0.29 1" contype="4" conaffinity="2"/>
+        <site name="trunk_tip" pos="0 0 0.4725" size="0.02" rgba="0.9 0.2 0.2 1"/>
+      </body>
+
+      <!-- Left Leg (Hip -> Knee -> Ankle -> Foot) -->
+      <body name="thigh_l" pos="0 0.05 0">
+        <joint name="q_lh" type="hinge" axis="0 1 0" range="-1.5 0.8"/>
+        <inertial pos="0 0 -0.20" mass="8.5" diaginertia="0.09 0.15 0.09"/>
+        <geom name="thigh_l_geom" type="capsule" fromto="0 0 0 0 0 -0.42" size="0.045" rgba="1.0 0.5 0.05 1" contype="0" conaffinity="0"/>
+
+        <body name="shank_l" pos="0 0 -0.45">
+          <!-- Human knee flexion axis: 0 -1 0 (negative angle flexes shank backward -X) -->
+          <joint name="q_lk" type="hinge" axis="0 -1 0" range="-2.0 0.0"/>
+          <inertial pos="0 0 -0.20" mass="3.5" diaginertia="0.03 0.05 0.03"/>
+          <geom name="shank_l_geom" type="capsule" fromto="0 0 0 0 0 -0.40" size="0.035" rgba="1.0 0.5 0.05 1" contype="0" conaffinity="0"/>
+
+          <body name="foot_l" pos="0 0 -0.45">
+            <!-- Ankle joint axis: 0 -1 0 -->
+            <joint name="q_la" type="hinge" axis="0 -1 0" range="-1.2 1.2"/>
+            <inertial pos="0.05 0 0" mass="1.0" diaginertia="0.006 0.01 0.006"/>
+            <geom name="foot_l_sole" type="capsule" fromto="-0.07 0 0 0.17 0 0" size="0.02" rgba="0.84 0.15 0.16 1" contype="1" conaffinity="1"/>
+            <!-- 4 Foot Sole Contact Spheres (Visual / Kinematic sites only) -->
+            <geom name="contact_p1_l" type="sphere" pos="-0.07 0 0" size="0.02" rgba="0 0 0 0" contype="0" conaffinity="0"/>
+            <geom name="contact_p2_l" type="sphere" pos="-0.02 0 0" size="0.02" rgba="0 0 0 0" contype="0" conaffinity="0"/>
+            <geom name="contact_p3_l" type="sphere" pos="0.08 0 0" size="0.02" rgba="0 0 0 0" contype="0" conaffinity="0"/>
+            <geom name="contact_p4_l" type="sphere" pos="0.17 0 0" size="0.02" rgba="0 0 0 0" contype="0" conaffinity="0"/>
+          </body>
+        </body>
+      </body>
+
+      <!-- Right Leg (Hip -> Knee -> Ankle -> Foot) -->
+      <body name="thigh_r" pos="0 -0.05 0">
+        <joint name="q_rh" type="hinge" axis="0 1 0" range="-1.5 0.8"/>
+        <inertial pos="0 0 -0.20" mass="8.5" diaginertia="0.09 0.15 0.09"/>
+        <geom name="thigh_r_geom" type="capsule" fromto="0 0 0 0 0 -0.42" size="0.045" rgba="0.17 0.63 0.17 1" contype="0" conaffinity="0"/>
+
+        <body name="shank_r" pos="0 0 -0.45">
+          <!-- Human knee flexion axis: 0 -1 0 (negative angle flexes shank backward -X) -->
+          <joint name="q_rk" type="hinge" axis="0 -1 0" range="-2.0 0.0"/>
+          <inertial pos="0 0 -0.20" mass="3.5" diaginertia="0.03 0.05 0.03"/>
+          <geom name="shank_r_geom" type="capsule" fromto="0 0 0 0 0 -0.40" size="0.035" rgba="0.17 0.63 0.17 1" contype="0" conaffinity="0"/>
+
+          <body name="foot_r" pos="0 0 -0.45">
+            <!-- Ankle joint axis: 0 -1 0 -->
+            <joint name="q_ra" type="hinge" axis="0 -1 0" range="-1.2 1.2"/>
+            <inertial pos="0.05 0 0" mass="1.0" diaginertia="0.006 0.01 0.006"/>
+            <geom name="foot_r_sole" type="capsule" fromto="-0.07 0 0 0.17 0 0" size="0.02" rgba="0.58 0.40 0.74 1" contype="1" conaffinity="1"/>
+            <!-- 4 Foot Sole Contact Spheres (Visual / Kinematic sites only) -->
+            <geom name="contact_p1_r" type="sphere" pos="-0.07 0 0" size="0.02" rgba="0 0 0 0" contype="0" conaffinity="0"/>
+            <geom name="contact_p2_r" type="sphere" pos="-0.02 0 0" size="0.02" rgba="0 0 0 0" contype="0" conaffinity="0"/>
+            <geom name="contact_p3_r" type="sphere" pos="0.08 0 0" size="0.02" rgba="0 0 0 0" contype="0" conaffinity="0"/>
+            <geom name="contact_p4_r" type="sphere" pos="0.17 0 0" size="0.02" rgba="0 0 0 0" contype="0" conaffinity="0"/>
+          </body>
+        </body>
+      </body>
+
+    </body>
+  </worldbody>
+
+  <!-- 7 Direct Torque Actuators (Lumbar + 6 Leg Joints) -->
+  <actuator>
+    <motor name="act_lum" joint="q_lum" gear="1"/>
+    <motor name="act_lh" joint="q_lh" gear="1"/>
+    <motor name="act_lk" joint="q_lk" gear="1"/>
+    <motor name="act_la" joint="q_la" gear="1"/>
+    <motor name="act_rh" joint="q_rh" gear="1"/>
+    <motor name="act_rk" joint="q_rk" gear="1"/>
+    <motor name="act_ra" joint="q_ra" gear="1"/>
+  </actuator>
+</mujoco>

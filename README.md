@@ -33,6 +33,9 @@ MTG_RL/
 ├── motions/
 │   ├── Arnold2013Walking_subject01_walk2.npz       # Experiment 1: Walking reference (~1.25 m/s)
 │   ├── Hamner2013_Run20_cycle.npz                  # Experiment 2: Slow running reference (2.0 m/s)
+│   ├── Hamner2013_Run50_cycle.npz                  # Experiment 3: Fast sprinting reference (5.0 m/s)
+│   ├── Kumar2022_SitToStand.npz                    # Experiment 5: Single Sit-to-Stand reference (1.50 s)
+│   └── CeTI_5xSTS_subK1.npz                        # Experiment 6: Real 5-Times Sit-to-Stand (CeTI-Locomotion, 11.29 s)
 │   ├── Hamner2013_Run50_cycle.npz                  # Experiment 3: Fast running reference (5.0 m/s)
 │   ├── Kumar2022_SitToStand.npz                    # Experiment 5: Healthy young adult Sit-to-Stand (500 Hz, 1.50 s)
 │   ├── Kumar2022_HealthyYoung_SitToStand_raw.sto   # Raw OpenSim Healthy Young STS kinematics (Kumar et al. 2022)
@@ -226,9 +229,25 @@ In **Experiment 5**, we evaluate **Sit-to-Stand (STS)** motion imitation from a 
 
 ---
 
+### Experiment 6: Un-Time-Bounded CoM-Tracked 5-Times Sit-to-Stand (`CeTI-Locomotion`)
+
+To expose **clear visual kinematic differences** between Young and Elderly adults without forcing a fixed wall-clock timer, Experiment 6 uses real **5-Times Sit-to-Stand (5xSTS)** motion capture from **CeTI-Locomotion** (`10.6084/m9.figshare.26880076`, `sub-K1_task-sts_tracksys-RokokoSmartSuitPro1_run-1`, [`motions/CeTI_5xSTS_subK1.npz`](motions/CeTI_5xSTS_subK1.npz)) on a **backless chair** (`z = 0.535 m` seat, `0.50 m` legs, thigh–chair collisions enabled in [`biped_sts_chair.xml`](biped_sts_chair.xml)) with a **CoM-gated, un-time-bounded phase** (advances only when CoM is within `0.16 m` of the carrot, using PD posture baseline + loose joint guide):
+
+- **Mode 1 (Healthy Unscaled — Unlimited PD, Left in GIF)**: `1100/1100` steps (`22.00 s`), **`Reps = 5/5`** (`Fell = False`), `Peak Vz = 0.56 m/s`, `Peak Lean = 52.4°`, `Mean Act^2 = 0.167` (completes 5th stand at `t ≈ 13.7 s`).
+- **Mode 2 (Healthy Young Adult — Millard MTG, Center in GIF)**: `1100/1100` steps (`22.00 s`), **`Reps = 5/5`** (`Fell = False`), `Peak Vz = 0.65 m/s`, `Peak Lean = 40.1°`, `Mean Act^2 = 0.149` (completes 5th stand at `t ≈ 14.3 s`).
+- **Mode 2 (Elderly Scaled MTG, Right in GIF)**:
+  - **Zero-Shot Young Policy on Elderly**: `0/5` reps (`1100/1100` steps, `Fell = False`, `Peak Vz = 0.31 m/s`) — unable to lift off the chair under Young's policy.
+  - **Adapted Elderly RL Policy (`checkpoints/exp6_5xsts_com_mode2_elderly.pt`)**: Completes all **`Reps = 5/5`** (`1100/1100` steps, `22.00 s`, `Fell = False`, `Frame = 5645/5646`) with unmistakable **visual kinematic lag and higher effort**: visibly lags behind Young on every repetition (including a longer seated pause before Rep 3 at `t = 6.5–8.0 s`), finishes the 5th stand at **`t ≈ 17.0 s` (`~2.7 s` slower than Young)** with `Peak Vz = 0.63 m/s`, `Peak Lean = 38.5°`, and **`Mean Act^2 = 0.230`** (**`+54.4%` higher squared muscle effort** than Young's `0.149`).
+
+![Experiment 6 5-Times Sit-to-Stand 3-Model Overlay](renders/exp6_5x_sts_overlay.gif)
+
+![Experiment 6 5-Times Sit-to-Stand Torque and Limits](renders/exp6_5x_sts_torque_limits.png)
+
+---
+
 ## 🚀 Running the Suite
 
-To run or re-render all five experiments (loads existing checkpoints in `checkpoints/` or trains from scratch if removed):
+To run or re-render all six experiments (loads existing checkpoints in `checkpoints/` or trains from scratch if removed):
 
 ```bash
 python run_all_experiments.py

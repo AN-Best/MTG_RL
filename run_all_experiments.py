@@ -1728,7 +1728,7 @@ class SitToStandTrackingEnv:
       - mode="mode2"         : Healthy Young Adult — Millard Table A.2 500 Hz Clamped MTG
       - mode="mode2_elderly" : Healthy Elderly Adult — Walking-Scaled Millard 500 Hz Clamped MTG
     """
-    def __init__(self, clip, mode="mode1", mtg_phase="hard", decimation=10):
+    def __init__(self, clip, mode="mode1", mtg_phase="hard", decimation=10, is_multi_rep=False, train_max_steps=None):
         self.clip = clip
         if mode in ["mode1", "ideal_unlimited", "unlimited"]:
             self.mode = "mode1"
@@ -1739,7 +1739,9 @@ class SitToStandTrackingEnv:
 
         self.mtg_phase = mtg_phase
         self.decimation = decimation
-        self.max_steps = (clip.num_frames - 1) // decimation  # 75 steps (1.50s)
+        self.is_multi_rep = bool(is_multi_rep)
+        full_steps = (clip.num_frames - 1) // decimation
+        self.max_steps = int(train_max_steps) if train_max_steps is not None else full_steps
 
         if self.mode == "mode1":
             actuator_type = "ideal_unlimited"
@@ -1762,6 +1764,7 @@ class SitToStandTrackingEnv:
 
         self.q_safe_min = np.array([-0.35, -1.55, -1.75, -0.50, -1.55, -1.75, -0.50], dtype=np.float32)
         self.q_safe_max = np.array([0.60, 0.15, 0.00, 0.65, 0.15, 0.00, 0.65], dtype=np.float32)
+        self.q_nominal = 0.5 * (self.q_safe_min + self.q_safe_max)
 
         self.prev_action = np.zeros(7, dtype=np.float32)
         self.filtered_action = np.zeros(7, dtype=np.float32)
@@ -1813,7 +1816,13 @@ class SitToStandTrackingEnv:
                 f_chair += normal_f
         return float(f_chair)
 
-    def reset(self, start_frame=0):
+    def reset(self, start_frame=None):
+        if start_frame is None:
+            if self.is_multi_rep and np.random.rand() < 0.70:
+                max_start = max(0, self.clip.num_frames - 1 - self.max_steps * self.decimation)
+                start_frame = int(np.random.randint(0, max_start + 1)) if max_start > 0 else 0
+            else:
+                start_frame = 0
         self.current_frame = int(np.clip(start_frame, 0, self.clip.num_frames - 1))
         q0, u0 = self._get_clamped_frame(self.current_frame)
         self.env.reset(qpos_init=q0.copy(), qvel_init=u0.copy())
@@ -1895,7 +1904,7 @@ class SitToStandTrackingEnv:
         tau_acc = np.zeros(7, dtype=np.float32)
         act_sq_acc = 0.0
         excess_norm_acc = np.zeros(7, dtype=np.float32)
-        u_scale = 0.65 if self.mode == "mode2_elderly" else 1.0
+        u_scale = 1.0 if self.is_multi_rep else (0.65 if self.mode == "mode2_elderly" else 1.0)
 
         for sub_step in range(self.decimation):
             k_frame = self.current_frame + sub_step
@@ -1972,22 +1981,24 @@ class SitToStandTrackingEnv:
 
         phi = min(1.0, self.current_frame / float(max(1, self.clip.num_frames - 1)))
 
+        x_w = 30.0 if self.is_multi_rep else 15.0
         if self.mode == "mode2_elderly":
-            # Relax trunk tracking during seat-off/extension (phi in [0.25, 0.80]) so the
-            # elderly model can pitch its trunk deeper forward ("momentum-transfer strategy")
-            # to bring the CoM over the feet and unload the weakened knees, then stand upright at phi > 0.85
-            r_q = np.exp(-18.0 * mse_q_legs)
-            rot_w = 3.0 if phi < 0.82 else 20.0
+            # Relax trunk tracking during seat-off/extension so the elderly model can pitch
+            # its trunk deeper forward ("momentum-transfer strategy") to unload weakened knees.
+            r_q = np.exp(-25.0 * mse_q_all) if self.is_multi_rep else np.exp(-18.0 * mse_q_legs)
+            rot_w = 18.0 if self.is_multi_rep else (3.0 if phi < 0.82 else 20.0)
             r_rot = np.exp(-rot_w * p_err_sq - 0.5 * vp_err_sq)
-            r_pos_z = np.exp(-25.0 * z_err_sq) + (0.35 * np.exp(-35.0 * (q_curr[1] - 0.919)**2) if phi > 0.80 else 0.0)
+            stand_bonus = 0.0 if self.is_multi_rep else (0.35 * np.exp(-35.0 * (q_curr[1] - 0.919)**2) if phi > 0.80 else 0.0)
+            r_pos_z = np.exp(-25.0 * z_err_sq) + stand_bonus
             trunk_tip_x = float(self.env.data.site_xpos[self.trunk_tip_id][0])
             com_x = 0.55 * float(q_curr[0]) + 0.45 * trunk_tip_x
-            r_pos_x = np.exp(-15.0 * x_err_sq) + (0.25 * np.exp(-15.0 * com_x**2) if 0.25 <= phi <= 0.80 else 0.0)
+            com_bonus = (0.15 * np.exp(-15.0 * com_x**2)) if (not self.is_multi_rep and (0.25 <= phi <= 0.80)) else 0.0
+            r_pos_x = np.exp(-x_w * x_err_sq) + com_bonus
         else:
             r_q = np.exp(-30.0 * mse_q_all)
             r_rot = np.exp(-25.0 * p_err_sq - 1.0 * vp_err_sq)
             r_pos_z = np.exp(-35.0 * z_err_sq)
-            r_pos_x = np.exp(-15.0 * x_err_sq)
+            r_pos_x = np.exp(-x_w * x_err_sq)
 
         r_u = np.exp(-0.2 * mse_u)
         r_vel = np.exp(-8.0 * vx_err_sq)
@@ -2016,6 +2027,10 @@ class SitToStandTrackingEnv:
         cart_mse = float(np.mean((curr_ee_rel - ref_ee_rel)**2))
         r_cart = np.exp(-15.0 * cart_mse)
 
+        # Keep feet planted in world X during multi-rep 5xSTS so they don't slide out too far
+        foot_world_x_mse = 0.5 * ((pos_l[0] - ref_l[0])**2 + (pos_r[0] - ref_r[0])**2)
+        r_foot = 0.15 * np.exp(-40.0 * foot_world_x_mse) if self.is_multi_rep else 0.0
+
         p_act = -0.02 * float(np.sum((filtered - prev_filtered)**2))
         mean_act_sq = act_sq_acc / float(self.decimation)
         p_effort = -0.05 * mean_act_sq if self.mode != "mode1" else 0.0
@@ -2031,13 +2046,16 @@ class SitToStandTrackingEnv:
             + 0.10 * r_vel
             + 0.10 * r_cart
             + 0.05 * r_u
+            + r_foot
             + p_act
             + p_effort
             + p_mtg_excess
         )
 
         pitch_err = abs(torso_curr - torso_ref)
-        fell = bool(q_curr[1] < 0.45 or torso_curr < -0.45 or torso_curr > 1.15)
+        torso_min = -0.58 if self.is_multi_rep else -0.45
+        torso_max = 1.25 if self.is_multi_rep else 1.15
+        fell = bool(q_curr[1] < 0.45 or torso_curr < torso_min or torso_curr > torso_max)
         self.step_count += 1
         done = bool(fell or self.current_frame >= self.clip.num_frames - 1 or self.step_count >= self.max_steps)
         if fell:
@@ -2058,9 +2076,15 @@ class SitToStandTrackingEnv:
 
 
 class VectorSitToStandEnv:
-    def __init__(self, clip, num_envs=64, mode="mode1", mtg_phase="hard"):
+    def __init__(self, clip, num_envs=64, mode="mode1", mtg_phase="hard", is_multi_rep=False, train_max_steps=None):
         self.num_envs = num_envs
-        self.envs = [SitToStandTrackingEnv(clip, mode=mode, mtg_phase=mtg_phase) for _ in range(num_envs)]
+        self.envs = [
+            SitToStandTrackingEnv(
+                clip, mode=mode, mtg_phase=mtg_phase,
+                is_multi_rep=is_multi_rep, train_max_steps=train_max_steps
+            )
+            for _ in range(num_envs)
+        ]
         dummy = self.envs[0].reset()
         self.obs_dim = dummy.shape[0]
 
@@ -2123,18 +2147,20 @@ def evaluate_500hz_sts_experiment(
     policy2_elderly,
     gif_path,
     plot_path,
-    max_steps=75
+    max_steps=75,
+    is_multi_rep=False,
+    render_stride=1
 ):
     print("\n" + "=" * 78)
     print(f"   500 Hz EVALUATION & RENDERING: {exp_title}")
     print("=" * 78)
 
-    env1 = SitToStandTrackingEnv(clip, mode="mode1", mtg_phase="hard")
-    env2 = SitToStandTrackingEnv(clip, mode="mode2", mtg_phase="hard")
-    env3 = SitToStandTrackingEnv(clip, mode="mode2_elderly", mtg_phase="hard")
+    env1 = SitToStandTrackingEnv(clip, mode="mode1", mtg_phase="hard", is_multi_rep=is_multi_rep)
+    env2 = SitToStandTrackingEnv(clip, mode="mode2", mtg_phase="hard", is_multi_rep=is_multi_rep)
+    env3 = SitToStandTrackingEnv(clip, mode="mode2_elderly", mtg_phase="hard", is_multi_rep=is_multi_rep)
 
     # Evaluate Zero-Shot transfer: Young policy2_young executed on Elderly Scaled MTG model
-    env_zs = SitToStandTrackingEnv(clip, mode="mode2_elderly", mtg_phase="hard")
+    env_zs = SitToStandTrackingEnv(clip, mode="mode2_elderly", mtg_phase="hard", is_multi_rep=is_multi_rep)
     obs_zs = env_zs.reset(start_frame=0)
     z_zs = [float(env_zs.env.data.qpos[1])]
     pe_zs, pte_zs = [], []
@@ -2360,13 +2386,16 @@ def evaluate_500hz_sts_experiment(
         q_ref_end, _ = env1._get_clamped_frame(env1.current_frame)
         torso_ref_end = float(q_ref_end[2] + q_ref_end[3])
 
+        torso_min_eval = -0.58 if is_multi_rep else -0.45
+        torso_max_eval = 1.25 if is_multi_rep else 1.15
+
         if not done1:
             obs1 = env1.get_obs()
             step1_survived = step + 1
             q1 = env1.env.data.qpos
             pe1_list.append(float(np.degrees(np.sqrt(np.mean((q1[3:10] - q_ref_end[3:10])**2)))))
             pte1_list.append(float(np.degrees(abs((q1[2] + q1[3]) - torso_ref_end))))
-            if q1[1] < 0.45 or (q1[2] + q1[3]) < -0.45 or (q1[2] + q1[3]) > 1.15:
+            if q1[1] < 0.45 or (q1[2] + q1[3]) < torso_min_eval or (q1[2] + q1[3]) > torso_max_eval:
                 fell1 = True
                 done1 = True
 
@@ -2376,7 +2405,7 @@ def evaluate_500hz_sts_experiment(
             q2 = env2.env.data.qpos
             pe2_list.append(float(np.degrees(np.sqrt(np.mean((q2[3:10] - q_ref_end[3:10])**2)))))
             pte2_list.append(float(np.degrees(abs((q2[2] + q2[3]) - torso_ref_end))))
-            if q2[1] < 0.45 or (q2[2] + q2[3]) < -0.45 or (q2[2] + q2[3]) > 1.15:
+            if q2[1] < 0.45 or (q2[2] + q2[3]) < torso_min_eval or (q2[2] + q2[3]) > torso_max_eval:
                 fell2 = True
                 done2 = True
 
@@ -2386,39 +2415,40 @@ def evaluate_500hz_sts_experiment(
             q3 = env3.env.data.qpos
             pe3_list.append(float(np.degrees(np.sqrt(np.mean((q3[3:10] - q_ref_end[3:10])**2)))))
             pte3_list.append(float(np.degrees(abs((q3[2] + q3[3]) - torso_ref_end))))
-            if q3[1] < 0.45 or (q3[2] + q3[3]) < -0.45 or (q3[2] + q3[3]) > 1.15:
+            if q3[1] < 0.45 or (q3[2] + q3[3]) < torso_min_eval or (q3[2] + q3[3]) > torso_max_eval:
                 fell3 = True
                 done3 = True
 
-        q1_vis = env1.env.data.qpos[:10].copy()
-        q2_vis = env2.env.data.qpos[:10].copy()
-        q3_vis = env3.env.data.qpos[:10].copy()
+        if step % render_stride == 0 or step == max_steps - 1:
+            q1_vis = env1.env.data.qpos[:10].copy()
+            q2_vis = env2.env.data.qpos[:10].copy()
+            q3_vis = env3.env.data.qpos[:10].copy()
 
-        # Position the 3 sit-to-stand bipeds on their respective chairs (-1.05m Left, 0.0m Center, +1.05m Right)
-        q1_vis[0] -= 1.05
-        q3_vis[0] += 1.05
+            # Position the 3 sit-to-stand bipeds on their respective chairs (-1.05m Left, 0.0m Center, +1.05m Right)
+            q1_vis[0] -= 1.05
+            q3_vis[0] += 1.05
 
-        overlay_data.qpos[:10] = q1_vis
-        overlay_data.qpos[10:20] = q2_vis
-        overlay_data.qpos[20:30] = q3_vis
-        mujoco.mj_forward(overlay_model, overlay_data)
+            overlay_data.qpos[:10] = q1_vis
+            overlay_data.qpos[10:20] = q2_vis
+            overlay_data.qpos[20:30] = q3_vis
+            mujoco.mj_forward(overlay_model, overlay_data)
 
-        camera.lookat[0] = -0.10
-        camera.lookat[1] = 0.0
-        camera.lookat[2] = 0.72
+            camera.lookat[0] = -0.10
+            camera.lookat[1] = 0.0
+            camera.lookat[2] = 0.72
 
-        renderer.update_scene(overlay_data, camera)
-        rgb = renderer.render()
-        pil_img = Image.fromarray(rgb)
-        draw = ImageDraw.Draw(pil_img)
+            renderer.update_scene(overlay_data, camera)
+            rgb = renderer.render()
+            pil_img = Image.fromarray(rgb)
+            draw = ImageDraw.Draw(pil_img)
 
-        s1_str = f"Left [Mode 1 Unlimited]: z={env1.env.data.qpos[1]:.2f}m"
-        s2_str = f"Center [Mode 2 Young MTG]: z={env2.env.data.qpos[1]:.2f}m"
-        s3_str = f"Right [Mode 2 Elderly MTG]: z={env3.env.data.qpos[1]:.2f}m"
-        text_str = f"{exp_title} (t={step*0.02:.2f}s) | {s1_str} | {s2_str} | {s3_str}"
-        draw.rectangle([(10, 12), (950, 50)], fill=(15, 23, 42, 225), outline=(56, 189, 248), width=2)
-        draw.text((18, 23), text_str, fill=(240, 249, 255))
-        frames.append(np.array(pil_img))
+            s1_str = f"Left [Mode 1 Unlimited]: z={env1.env.data.qpos[1]:.2f}m"
+            s2_str = f"Center [Mode 2 Young MTG]: z={env2.env.data.qpos[1]:.2f}m"
+            s3_str = f"Right [Mode 2 Elderly MTG]: z={env3.env.data.qpos[1]:.2f}m"
+            text_str = f"{exp_title} (t={step*0.02:.2f}s) | {s1_str} | {s2_str} | {s3_str}"
+            draw.rectangle([(10, 12), (950, 50)], fill=(15, 23, 42, 225), outline=(56, 189, 248), width=2)
+            draw.text((18, 23), text_str, fill=(240, 249, 255))
+            frames.append(np.array(pil_img))
 
     for _ in range(12):
         frames.append(np.array(pil_img))
@@ -2518,6 +2548,616 @@ def evaluate_500hz_sts_experiment(
     plt.savefig(plot_path, dpi=200)
     plt.close()
     print(f"[DONE] Saved Torque & Limits Plot: {plot_path}")
+
+
+# -----------------------------------------------------------------------------
+# Experiment 6: Un-Time-Bounded CoM-Tracked 5-Times Sit-to-Stand (5xSTS)
+# -----------------------------------------------------------------------------
+class FiveTimesSTSCoMEnv:
+    """
+    Un-time-bounded 5-Times Sit-to-Stand environment driven by Center-of-Mass (CoM)
+    targets extracted from CeTI-Locomotion (sub-K1), loosened joint regularization,
+    world foot-plant stability, speed-progress reward, and a survival benefit.
+    """
+    def __init__(self, clip, mode="mode1", mtg_phase="hard", decimation=10, max_steps=600, is_train=False):
+        self.clip = clip
+        if mode in ["mode1", "ideal_unlimited", "unlimited"]:
+            self.mode = "mode1"
+        elif mode in ["mode2_elderly", "mtg_elderly", "elderly"]:
+            self.mode = "mode2_elderly"
+        else:
+            self.mode = "mode2"
+
+        self.mtg_phase = mtg_phase
+        self.decimation = decimation
+        self.max_steps = int(max_steps)
+        self.is_train = bool(is_train)
+
+        if self.mode == "mode1":
+            actuator_type = "ideal_unlimited"
+        elif self.mode == "mode2":
+            actuator_type = "ideal_unlimited" if self.mtg_phase == "soft" else "mtg_clamped"
+        else:
+            actuator_type = "ideal_unlimited" if self.mtg_phase == "soft" else "mtg_elderly"
+
+        self.env = BipedEnv(actuator_type=actuator_type, device="cpu", xml_filename="biped_sts_chair.xml")
+        if self.mode in ["mode2", "mode2_elderly"] and self.mtg_phase != "soft":
+            configure_sts_millard_actuator(self.env.actuator, is_elderly=(self.mode == "mode2_elderly"))
+
+        self.pelvis_body_id = mujoco.mj_name2id(self.env.model, mujoco.mjtObj.mjOBJ_BODY, "pelvis")
+        self.pelvis_id = mujoco.mj_name2id(self.env.model, mujoco.mjtObj.mjOBJ_GEOM, "pelvis_geom")
+        self.sole_l_id = mujoco.mj_name2id(self.env.model, mujoco.mjtObj.mjOBJ_GEOM, "foot_l_sole")
+        self.sole_r_id = mujoco.mj_name2id(self.env.model, mujoco.mjtObj.mjOBJ_GEOM, "foot_r_sole")
+        self.trunk_tip_id = mujoco.mj_name2id(self.env.model, mujoco.mjtObj.mjOBJ_SITE, "trunk_tip")
+
+        self.q_safe_min = np.array([-0.35, -1.55, -1.75, -0.50, -1.55, -1.75, -0.50], dtype=np.float32)
+        self.q_safe_max = np.array([0.60, 0.15, 0.00, 0.65, 0.15, 0.00, 0.65], dtype=np.float32)
+        self.q_nominal = 0.5 * (self.q_safe_min + self.q_safe_max)
+
+        # Extract canonical seated and standing reference states & CoMs from CeTI 5xSTS clip
+        i_sit = 0
+        i_stand = int(np.argmax(clip.q[:, 1]))
+        self.q_sit_ref = clip.q[i_sit].copy()
+        self.q_stand_ref = clip.q[i_stand].copy()
+
+        d_tmp = mujoco.MjData(self.env.model)
+        d_tmp.qpos[:] = self.q_sit_ref
+        mujoco.mj_kinematics(self.env.model, d_tmp)
+        mujoco.mj_comPos(self.env.model, d_tmp)
+        self.com_sit = d_tmp.subtree_com[self.pelvis_body_id].copy()
+        self.foot_x_ref = float(0.5 * (d_tmp.geom_xpos[self.sole_l_id, 0] + d_tmp.geom_xpos[self.sole_r_id, 0]))
+        self.foot_z_ref = float(0.5 * (d_tmp.geom_xpos[self.sole_l_id, 2] + d_tmp.geom_xpos[self.sole_r_id, 2]))
+
+        d_tmp.qpos[:] = self.q_stand_ref
+        mujoco.mj_kinematics(self.env.model, d_tmp)
+        mujoco.mj_comPos(self.env.model, d_tmp)
+        self.com_stand = d_tmp.subtree_com[self.pelvis_body_id].copy()
+
+        # Precompute reference whole-body CoM trajectory (stride 10 -> 50 Hz, interpolated)
+        com_coarse = np.zeros((clip.num_frames, 3), dtype=np.float32)
+        for idx in range(0, clip.num_frames, 10):
+            d_tmp.qpos[:] = clip.q[idx]
+            mujoco.mj_kinematics(self.env.model, d_tmp)
+            mujoco.mj_comPos(self.env.model, d_tmp)
+            com_coarse[idx] = d_tmp.subtree_com[self.pelvis_body_id]
+        for idx in range(clip.num_frames):
+            i0 = (idx // 10) * 10
+            i1 = min(clip.num_frames - 1, i0 + 10)
+            a_i = (idx - i0) / 10.0 if i1 > i0 else 0.0
+            com_coarse[idx] = (1.0 - a_i) * com_coarse[i0] + a_i * com_coarse[i1]
+        self.clip_com = com_coarse
+        self.current_frame = 0
+        self.last_d_frame = 10
+
+        from Biped_Actuators import create_actuator
+        ref_act_type = "mtg_elderly" if self.mode == "mode2_elderly" else "mtg_clamped"
+        ref_act = create_actuator(ref_act_type, device="cpu")
+        configure_sts_millard_actuator(ref_act, is_elderly=(self.mode == "mode2_elderly"))
+        self.T_max_pos = ref_act.T_max_pos_np.copy()
+        self.T_max_neg = ref_act.T_max_neg_np.copy()
+        self.q_opt = ref_act.q_opt_np.copy()
+        self.w = ref_act.w_np.copy()
+        self.u_max_pos = ref_act.u_max_pos_np.copy()
+        self.u_max_neg = ref_act.u_max_neg_np.copy()
+        self.k1_pass = ref_act.k1_pass_np.copy()
+        self.k2_pass = ref_act.k2_pass_np.copy()
+        self.q1_pass = ref_act.q1_pass_np.copy()
+        self.q2_pass = ref_act.q2_pass_np.copy()
+        self.tau_act = ref_act.tau_act
+        self.tau_deact = ref_act.tau_deact
+        self.a_min = ref_act.a_min
+        self.a_init = ref_act.a_init
+        self.a_soft = np.full(7, self.a_init, dtype=np.float32)
+
+        self.prev_action = np.zeros(7, dtype=np.float32)
+        self.filtered_action = np.zeros(7, dtype=np.float32)
+        self.step_count = 0
+        self.reps_completed = 0
+        self.subphase = "stand"
+        self.dwell_count = 0
+        self.prev_com = self.com_sit.copy()
+        self.max_torso_lean_deg = 0.0
+        self.max_vz = 0.0
+
+    def _compute_safe_q_des(self, q_des_raw):
+        return np.clip(q_des_raw, self.q_safe_min, self.q_safe_max)
+
+    def _get_com(self):
+        mujoco.mj_comPos(self.env.model, self.env.data)
+        return self.env.data.subtree_com[self.pelvis_body_id].copy()
+
+    def get_chair_contact_force(self):
+        f_chair = 0.0
+        d = self.env.data
+        for i in range(d.ncon):
+            c_array = np.zeros(6)
+            mujoco.mj_contactForce(self.env.model, d, i, c_array)
+            normal_f = abs(c_array[0])
+            g1, g2 = d.contact[i].geom1, d.contact[i].geom2
+            name1 = mujoco.mj_id2name(self.env.model, mujoco.mjtObj.mjOBJ_GEOM, g1) or ""
+            name2 = mujoco.mj_id2name(self.env.model, mujoco.mjtObj.mjOBJ_GEOM, g2) or ""
+            if any("chair" in n for n in (name1, name2)):
+                f_chair += normal_f
+        return float(f_chair)
+
+    def _get_clamped_frame(self, frame_idx):
+        idx = int(np.clip(frame_idx, 0, self.clip.num_frames - 1))
+        q = self.clip.q[idx].copy()
+        u = self.clip.u[idx].copy() if frame_idx < self.clip.num_frames else np.zeros_like(self.clip.u[0])
+        return q, u
+
+    def _target_state(self):
+        idx = int(np.clip(self.current_frame, 0, self.clip.num_frames - 1))
+        return self.clip_com[idx], self.clip.q[idx]
+
+    def reset(self, start_seated=True):
+        if self.is_train and np.random.rand() < 0.75:
+            max_start = max(0, self.clip.num_frames - 250)
+            start_frame = int(np.random.randint(0, max_start + 1)) if max_start > 0 else 0
+        else:
+            start_frame = 0
+        self.current_frame = start_frame
+        self.last_d_frame = 10
+        q0, u0 = self._get_clamped_frame(start_frame)
+        self.env.reset(qpos_init=q0.copy(), qvel_init=u0.copy())
+        self.a_soft = np.full(7, self.a_init, dtype=np.float32)
+        self.prev_action = np.zeros(7, dtype=np.float32)
+        self.filtered_action = np.zeros(7, dtype=np.float32)
+        self.step_count = 0
+        self.reps_completed = 0
+        self.subphase = "sit" if float(q0[1]) >= 0.85 else "stand"
+        self.dwell_count = 0
+        self.prev_com = self._get_com()
+        self.max_torso_lean_deg = float(np.degrees(q0[2] + q0[3]))
+        self.max_vz = 0.0
+        return self.get_obs()
+
+    def get_obs(self):
+        q_curr = self.env.data.qpos
+        u_curr = self.env.data.qvel
+        com = self._get_com()
+        com_vel = (com - self.prev_com) / 0.02
+        target_com, target_q = self._target_state()
+
+        q_joints = q_curr[3:10].astype(np.float32)
+        u_joints = (u_curr[3:10] * 0.1).astype(np.float32)
+        err_q = (target_q[3:10] - q_curr[3:10]).astype(np.float32)
+
+        com_feat = np.array([
+            target_com[0] - com[0],
+            target_com[2] - com[2],
+            com_vel[0] * 0.3,
+            com_vel[2] * 0.3,
+            q_curr[0] - target_q[0],
+            q_curr[1] - target_q[1],
+            float(q_curr[2] + q_curr[3]),
+            float(u_curr[2] + u_curr[3]) * 0.1,
+        ], dtype=np.float32)
+
+        pos_pelvis = self.env.data.geom_xpos[self.pelvis_id]
+        pos_l = self.env.data.geom_xpos[self.sole_l_id]
+        pos_r = self.env.data.geom_xpos[self.sole_r_id]
+        pos_t = self.env.data.site_xpos[self.trunk_tip_id]
+        rel_ee_pos = np.array([
+            pos_l[0] - pos_pelvis[0], pos_l[2] - pos_pelvis[2],
+            pos_r[0] - pos_pelvis[0], pos_r[2] - pos_pelvis[2],
+            pos_t[0] - pos_pelvis[0], pos_t[2] - pos_pelvis[2]
+        ], dtype=np.float32)
+
+        fl, fr = 0.0, 0.0
+        d = self.env.data
+        for i in range(d.ncon):
+            c_array = np.zeros(6)
+            mujoco.mj_contactForce(self.env.model, d, i, c_array)
+            normal_f = abs(c_array[0])
+            g1, g2 = d.contact[i].geom1, d.contact[i].geom2
+            name1 = mujoco.mj_id2name(self.env.model, mujoco.mjtObj.mjOBJ_GEOM, g1) or ""
+            name2 = mujoco.mj_id2name(self.env.model, mujoco.mjtObj.mjOBJ_GEOM, g2) or ""
+            if "foot_l_sole" in (name1, name2): fl += normal_f
+            if "foot_r_sole" in (name1, name2): fr += normal_f
+        f_chair = self.get_chair_contact_force()
+        contacts = np.array([min(fl + fr, 1500.0) / 600.0, min(f_chair, 1000.0) / 500.0], dtype=np.float32)
+
+        phase_sign = 1.0 if self.subphase in ("stand", "done") else -1.0
+        phase_feat = np.array([phase_sign, self.reps_completed / 5.0], dtype=np.float32)
+
+        obs = np.concatenate([
+            q_joints, u_joints, err_q, com_feat, rel_ee_pos, contacts, self.filtered_action, phase_feat
+        ], dtype=np.float32)
+        if obs.shape[0] < 64:
+            obs = np.pad(obs, (0, 64 - obs.shape[0]), mode="constant")
+        return obs[:64]
+
+    def step(self, action):
+        sym_leg = 0.5 * (action[1:4] + action[4:7])
+        sym_action = np.array([
+            action[0],
+            sym_leg[0], sym_leg[1], sym_leg[2],
+            sym_leg[0], sym_leg[1], sym_leg[2]
+        ], dtype=np.float32)
+
+        prev_filtered = self.filtered_action.copy()
+        filtered = 0.45 * self.filtered_action + 0.55 * sym_action
+        self.filtered_action = filtered.copy()
+
+        com_before = self._get_com()
+        self.prev_com = com_before.copy()
+
+        # Pure CoM-gated (time-free) carrot advancement:
+        # Advance along the CoM trajectory ONLY when current CoM is within 0.09m of the carrot;
+        # otherwise d_frame = 0 (waits for the biped regardless of how long it takes).
+        curr_com_ref = self.clip_com[int(np.clip(self.current_frame, 0, self.clip.num_frames - 1))]
+        com_dist_pre = float(np.sqrt((com_before[0] - curr_com_ref[0])**2 + (com_before[2] - curr_com_ref[2])**2))
+        if com_dist_pre < 0.16:
+            d_frame = int(np.clip(round(12.0 * (1.0 - com_dist_pre / 0.16)), 1, 12))
+        elif self.get_chair_contact_force() > 30.0 and com_dist_pre < 0.24:
+            d_frame = 2
+        else:
+            d_frame = 0
+        self.last_d_frame = d_frame
+
+        tau_acc = np.zeros(7, dtype=np.float32)
+        act_sq_acc = 0.0
+        excess_norm_acc = np.zeros(7, dtype=np.float32)
+
+        for sub_step in range(self.decimation):
+            alpha_s = (sub_step + 1) / float(self.decimation)
+            act_k = (1.0 - alpha_s) * prev_filtered + alpha_s * filtered
+            # PD target around CoM-gated reference posture (guides kinematics without enforcing speed)
+            sub_frame = int(np.clip(round(self.current_frame + d_frame * alpha_s), 0, self.clip.num_frames - 1))
+            q_ref_sub = self.clip.q[sub_frame, 3:10].astype(np.float32)
+            q_des = self._compute_safe_q_des(q_ref_sub + act_k)
+            u_des = np.zeros(7, dtype=np.float32)
+
+            q_jk = self.env.data.qpos[3:10].astype(np.float32)
+            u_jk = self.env.data.qvel[3:10].astype(np.float32)
+            f_Lk = np.exp(-((q_jk - self.q_opt) / self.w)**2)
+            nu_pos = np.clip(u_jk / self.u_max_pos, -1.0, 1.0)
+            nu_neg = np.clip(-u_jk / self.u_max_neg, -1.0, 1.0)
+            f_Vp = np.where(nu_pos >= 0.0,
+                            np.clip((1.0 - nu_pos) / (1.0 + 4.0 * nu_pos + 1e-6), 0.0, 1.0),
+                            np.clip(1.0 - 1.4 * nu_pos / (1.0 - 4.0 * nu_pos + 1e-6), 1.0, 1.6))
+            f_Vn = np.where(nu_neg >= 0.0,
+                            np.clip((1.0 - nu_neg) / (1.0 + 4.0 * nu_neg + 1e-6), 0.0, 1.0),
+                            np.clip(1.0 - 1.4 * nu_neg / (1.0 - 4.0 * nu_neg + 1e-6), 1.0, 1.6))
+            T_LV_p = self.T_max_pos * f_Lk * f_Vp
+            T_LV_n = self.T_max_neg * f_Lk * f_Vn
+            tau_pass_k = (
+                self.k1_pass * np.maximum(0.0, self.q1_pass - q_jk)**2
+                - self.k2_pass * np.maximum(0.0, q_jk - self.q2_pass)**2
+            )
+
+            _, tau = self.env.step_simulation(q_des, dt_sim=0.002, u_des=u_des)
+            tau_acc += tau
+
+            tau_act_des = tau - tau_pass_k
+            T_LV_dir = np.where(tau_act_des >= 0.0, T_LV_p, T_LV_n)
+            u_req = np.clip(np.abs(tau_act_des) / (T_LV_dir + 1e-3), 0.0, 1.0)
+            tau_c = np.where(u_req >= self.a_soft, self.tau_act, self.tau_deact)
+            self.a_soft = np.clip(self.a_soft + 0.002 * (u_req - self.a_soft) / tau_c, self.a_min, 1.0)
+
+            if self.mode in ["mode2", "mode2_elderly"] and self.mtg_phase != "soft":
+                a_sub = self.env.actuator.last_a
+            else:
+                a_sub = self.a_soft
+            act_sq_acc += float(np.mean(a_sub**2))
+
+            if self.mode in ["mode2", "mode2_elderly"] and self.mtg_phase == "soft":
+                Tp_k = self.a_soft * T_LV_p + tau_pass_k
+                Tn_k = self.a_soft * T_LV_n - tau_pass_k
+                ex_p = np.maximum(0.0, tau - Tp_k) / self.T_max_pos
+                ex_n = np.maximum(0.0, -tau - Tn_k) / self.T_max_neg
+                excess_norm_acc += np.where(tau - tau_pass_k >= 0.0, ex_p, ex_n)
+
+            torso_deg = float(np.degrees(self.env.data.qpos[2] + self.env.data.qpos[3]))
+            if torso_deg > self.max_torso_lean_deg:
+                self.max_torso_lean_deg = torso_deg
+            vz_sub = float(self.env.data.qvel[1])
+            if vz_sub > self.max_vz:
+                self.max_vz = vz_sub
+
+        self.current_frame = min(self.clip.num_frames - 1, self.current_frame + d_frame)
+        com_after = self._get_com()
+        q_curr = self.env.data.qpos
+        torso_curr = float(q_curr[2] + q_curr[3])
+        f_chair = self.get_chair_contact_force()
+        target_com, target_q = self._target_state()
+
+        # Pure CoM trajectory tracing (isotropic Euclidean CoM error + quadratic pull when far)
+        com_err_sq = (com_after[0] - target_com[0])**2 + (com_after[2] - target_com[2])**2
+        r_com = np.exp(-150.0 * com_err_sq)
+        p_com_far = -0.80 * min(com_err_sq, 0.25)
+
+        mse_q_all = float(np.mean((q_curr[3:10] - target_q[3:10])**2))
+        r_pose = np.exp(-2.0 * mse_q_all)
+
+        pos_l = self.env.data.geom_xpos[self.sole_l_id]
+        pos_r = self.env.data.geom_xpos[self.sole_r_id]
+        foot_slip_mse = 0.5 * ((pos_l[0] - self.foot_x_ref)**2 + (pos_r[0] - self.foot_x_ref)**2)
+        r_foot = np.exp(-40.0 * foot_slip_mse)
+
+        # Deadzone torso stability: free to lean within [+4.6 deg, +55.0 deg]; prevents backward rock on backless chair
+        target_torso = float(target_q[2] + target_q[3])
+        u_torso = float(self.env.data.qvel[2] + self.env.data.qvel[3])
+        torso_excess = max(0.0, abs(torso_curr - 0.52) - 0.44)
+        r_stable = np.exp(-12.0 * torso_excess**2 - 0.4 * u_torso**2)
+        p_torso_tip = -2.0 * (torso_excess**2)
+
+        # Progress reward only when CoM is actually tracking the curve
+        r_prog = d_frame / 10.0
+
+        # Track actual completed Sit-to-Stand repetitions + milestone bonuses
+        # Clinical 5xSTS ends on the 5th stand-up (matches CeTI_5xSTS_subK1.npz ending standing)
+        r_rep = 0.0
+        if self.subphase == "stand":
+            if com_after[2] >= 0.880 and q_curr[1] >= 0.85:
+                self.dwell_count += 1
+                if self.dwell_count >= 2:
+                    self.dwell_count = 0
+                    if self.reps_completed == 4:
+                        self.reps_completed = 5
+                        self.subphase = "done"
+                        r_rep = 10.0
+                    else:
+                        self.subphase = "sit"
+                        r_rep = 4.0
+            else:
+                self.dwell_count = 0
+        elif self.subphase == "sit":
+            if com_after[2] <= 0.735 and f_chair > 30.0:
+                self.dwell_count += 1
+                if self.dwell_count >= 2:
+                    self.reps_completed += 1
+                    self.dwell_count = 0
+                    self.subphase = "done" if self.reps_completed >= 5 else "stand"
+                    r_rep = 8.0
+            else:
+                self.dwell_count = 0
+
+        p_act = -0.02 * float(np.sum((filtered - prev_filtered)**2))
+        mean_act_sq = act_sq_acc / float(self.decimation)
+        p_effort = -0.02 * mean_act_sq if self.mode != "mode1" else 0.0
+        mtg_excess = excess_norm_acc / float(self.decimation)
+        p_mtg_excess = -0.50 * float(np.sum(mtg_excess**2)) if (self.mode != "mode1" and self.mtg_phase == "soft") else 0.0
+
+        reward = (
+            0.50 * r_com           # Tight CoM trajectory tracing
+            + 0.25 * r_pose        # Loose joint-level guide (allows kinematic adaptation)
+            + 0.85 * r_prog        # Advance along CoM curve when within tolerance (speed not enforced)
+            + r_rep                # Half-rep / full-rep milestone bonus
+            + 0.15 * r_foot        # Planted feet stability
+            + 0.20 * r_stable      # Anti-fall torso deadzone + angular velocity damping
+            - 0.55                 # Living offset so sitting still 0.16m behind carrot (d_frame=0) loses points
+            + p_com_far
+            + p_torso_tip
+            + p_act
+            + p_effort
+            + p_mtg_excess
+        )
+
+        fell = bool(
+            q_curr[1] < 0.45
+            or torso_curr < -0.65
+            or torso_curr > 1.35
+            or com_after[0] > 0.35
+            or com_after[0] < -0.45
+        )
+        self.step_count += 1
+        done = bool(fell or self.step_count >= self.max_steps)
+        if fell:
+            reward = -5.0
+
+        self.prev_action = sym_action.copy()
+        info = {
+            "fell": fell,
+            "pose_err": float(np.degrees(np.sqrt(mse_q_all))),
+            "pitch_err": float(np.degrees(abs(torso_curr - target_torso))),
+            "max_torso_lean_deg": self.max_torso_lean_deg,
+            "max_vz": self.max_vz,
+            "mean_act_sq": mean_act_sq,
+            "mtg_excess": float(np.sum(mtg_excess)),
+            "chair_fz": f_chair,
+            "reps_completed": self.reps_completed,
+            "com_z": float(com_after[2]),
+            "com_x": float(com_after[0]),
+        }
+        return self.get_obs(), reward, done, info
+
+
+class VectorFiveTimesSTSCoMEnv:
+    def __init__(self, clip, num_envs=64, mode="mode1", mtg_phase="hard", max_steps=260, is_train=True):
+        self.num_envs = num_envs
+        self.envs = [
+            FiveTimesSTSCoMEnv(clip, mode=mode, mtg_phase=mtg_phase, max_steps=max_steps, is_train=is_train)
+            for _ in range(num_envs)
+        ]
+        dummy = self.envs[0].reset()
+        self.obs_dim = dummy.shape[0]
+
+    def reset(self):
+        return np.array([e.reset() for e in self.envs], dtype=np.float32)
+
+    def step(self, actions):
+        next_obs_arr = np.zeros((self.num_envs, self.obs_dim), dtype=np.float32)
+        rew_arr = np.zeros(self.num_envs, dtype=np.float32)
+        done_arr = np.zeros(self.num_envs, dtype=bool)
+        pe_list, pte_list, ex_list = [], [], []
+        for i in range(self.num_envs):
+            n_obs, r, d, info = self.envs[i].step(actions[i])
+            if d:
+                n_obs = self.envs[i].reset()
+            next_obs_arr[i] = n_obs
+            rew_arr[i] = r
+            done_arr[i] = d
+            pe_list.append(info["pose_err"])
+            pte_list.append(info["pitch_err"])
+            ex_list.append(info.get("mtg_excess", 0.0))
+        return next_obs_arr, rew_arr, done_arr, {
+            "pose_err": float(np.mean(pe_list)),
+            "pitch_err": float(np.mean(pte_list)),
+            "mtg_excess": float(np.mean(ex_list))
+        }
+
+
+def evaluate_500hz_5xsts_com_experiment(
+    exp_title,
+    clip,
+    policy1,
+    policy2_young,
+    policy2_elderly,
+    gif_path,
+    plot_path,
+    max_steps=600,
+    render_stride=2
+):
+    print("\n" + "=" * 78)
+    print(f"   500 Hz EVALUATION & RENDERING: {exp_title}")
+    print("=" * 78)
+
+    env1 = FiveTimesSTSCoMEnv(clip, mode="mode1", mtg_phase="hard", max_steps=max_steps, is_train=False)
+    env2 = FiveTimesSTSCoMEnv(clip, mode="mode2", mtg_phase="hard", max_steps=max_steps, is_train=False)
+    env3 = FiveTimesSTSCoMEnv(clip, mode="mode2_elderly", mtg_phase="hard", max_steps=max_steps, is_train=False)
+
+    env_zs = FiveTimesSTSCoMEnv(clip, mode="mode2_elderly", mtg_phase="hard", max_steps=max_steps, is_train=False)
+    obs_zs = env_zs.reset()
+    z_zs = [float(env_zs._get_com()[2])]
+    fell_zs = False
+    steps_zs = 0
+    for _ in range(max_steps):
+        with torch.no_grad():
+            act_zs, _, _ = policy2_young.get_action(obs_zs, deterministic=True)
+        obs_zs, _, done_zs, info_zs = env_zs.step(act_zs.cpu().numpy())
+        steps_zs += 1
+        z_zs.append(info_zs["com_z"])
+        if info_zs["fell"]:
+            fell_zs = True
+        if done_zs:
+            break
+
+    obs1 = env1.reset()
+    obs2 = env2.reset()
+    obs3 = env3.reset()
+
+    overlay_model = mujoco.MjModel.from_xml_path("biped_overlay_sts.xml")
+    overlay_data = mujoco.MjData(overlay_model)
+    renderer = mujoco.Renderer(overlay_model, height=540, width=960)
+    camera = mujoco.MjvCamera()
+    mujoco.mjv_defaultCamera(camera)
+    camera.distance = 3.25
+    camera.azimuth = 90.0
+    camera.elevation = -10.0
+
+    from Biped_Actuators import MTGClampedActuator
+    ref_mtg = configure_sts_millard_actuator(MTGClampedActuator(device="cpu"), is_elderly=False)
+
+    frames = []
+    t_list = []
+    comz1, comz2, comz3 = [], [], []
+    chair_f2_list, ex1_list = [], []
+    tau1_list, tau2_list, tau3_list = [], [], []
+    tp2_list, tn2_list, tp3_list, tn3_list = [], [], [], []
+    act1_list, act2_list, act3_list = [], [], []
+    clamp2_cnt = np.zeros(7, dtype=int)
+    clamp3_cnt = np.zeros(7, dtype=int)
+    n_sub2, n_sub3 = 0, 0
+    done1 = done2 = done3 = False
+    fell1 = fell2 = fell3 = False
+    s1 = s2 = s3 = 0
+
+    for step in range(max_steps):
+        if done1 and done2 and done3:
+            break
+        with torch.no_grad():
+            a1 = policy1.get_action(obs1, deterministic=True)[0].cpu().numpy() if not done1 else np.zeros(7)
+            a2 = policy2_young.get_action(obs2, deterministic=True)[0].cpu().numpy() if not done2 else np.zeros(7)
+            a3 = policy2_elderly.get_action(obs3, deterministic=True)[0].cpu().numpy() if not done3 else np.zeros(7)
+
+        if not done1:
+            obs1, _, d1, inf1 = env1.step(a1)
+            s1 += 1
+            fell1 = fell1 or inf1["fell"]
+            done1 = d1
+            act1_list.append(inf1["mean_act_sq"])
+
+        if not done2:
+            obs2, _, d2, inf2 = env2.step(a2)
+            s2 += 1
+            fell2 = fell2 or inf2["fell"]
+            done2 = d2
+            act2_list.append(inf2["mean_act_sq"])
+            am2 = env2.env.actuator
+            clamp2_cnt += (np.abs(am2.last_tau - am2.last_tau_pd) > 0.5).astype(int) if hasattr(am2, "last_tau_pd") else 0
+            n_sub2 += 1
+
+        if not done3:
+            obs3, _, d3, inf3 = env3.step(a3)
+            s3 += 1
+            fell3 = fell3 or inf3["fell"]
+            done3 = d3
+            act3_list.append(inf3["mean_act_sq"])
+            n_sub3 += 1
+
+        t_list.append((step + 1) * 0.02)
+        comz1.append(float(env1._get_com()[2]))
+        comz2.append(float(env2._get_com()[2]))
+        comz3.append(float(env3._get_com()[2]))
+        chair_f2_list.append(env2.get_chair_contact_force())
+
+        if step % render_stride == 0 or step == max_steps - 1:
+            q1_vis = env1.env.data.qpos[:10].copy()
+            q2_vis = env2.env.data.qpos[:10].copy()
+            q3_vis = env3.env.data.qpos[:10].copy()
+            q1_vis[0] -= 1.05
+            q3_vis[0] += 1.05
+            overlay_data.qpos[:10] = q1_vis
+            overlay_data.qpos[10:20] = q2_vis
+            overlay_data.qpos[20:30] = q3_vis
+            mujoco.mj_forward(overlay_model, overlay_data)
+
+            camera.lookat[0] = -0.10
+            camera.lookat[1] = 0.0
+            camera.lookat[2] = 0.72
+            renderer.update_scene(overlay_data, camera)
+            rgb = renderer.render()
+            pil_img = Image.fromarray(rgb)
+            draw = ImageDraw.Draw(pil_img)
+            text_str = (
+                f"{exp_title} (t={step*0.02:.2f}s) | "
+                f"M1: {env1.reps_completed}/5 | "
+                f"Young: {env2.reps_completed}/5 | "
+                f"Elderly: {env3.reps_completed}/5"
+            )
+            draw.rectangle([(10, 12), (950, 50)], fill=(15, 23, 42, 225), outline=(56, 189, 248), width=2)
+            draw.text((18, 23), text_str, fill=(240, 249, 255))
+            frames.append(np.array(pil_img))
+
+    for _ in range(12):
+        frames.append(np.array(pil_img))
+    imageio.mimsave(gif_path, frames, fps=25, loop=0)
+    print(f"\n[DONE] Saved Overlay GIF: {gif_path}")
+
+    print(f"  Mode 1 (Unlimited PD)      : Steps={s1}/{max_steps} ({s1*0.02:.2f}s) | Reps={env1.reps_completed}/5 | Fell={fell1} | PeakVz={env1.max_vz:.2f}m/s | PeakLean={env1.max_torso_lean_deg:.1f}deg | MeanAct2={np.mean(act1_list):.3f}")
+    print(f"  Mode 2 (Young Millard MTG) : Steps={s2}/{max_steps} ({s2*0.02:.2f}s) | Reps={env2.reps_completed}/5 | Fell={fell2} | PeakVz={env2.max_vz:.2f}m/s | PeakLean={env2.max_torso_lean_deg:.1f}deg | MeanAct2={np.mean(act2_list):.3f}")
+    print(f"  Mode 2 (Elderly MTG)       : Steps={s3}/{max_steps} ({s3*0.02:.2f}s) | Reps={env3.reps_completed}/5 | Fell={fell3} | PeakVz={env3.max_vz:.2f}m/s | PeakLean={env3.max_torso_lean_deg:.1f}deg | MeanAct2={np.mean(act3_list):.3f}")
+    print(f"  Elderly Zero-Shot Young    : Steps={steps_zs}/{max_steps} ({steps_zs*0.02:.2f}s) | Reps={env_zs.reps_completed}/5 | Fell={fell_zs} | PeakVz={env_zs.max_vz:.2f}m/s")
+
+    fig, ax = plt.subplots(figsize=(11, 4.5))
+    ax.plot(t_list, comz1, "b--", lw=1.8, label=f"Mode 1 Unlimited ({env1.reps_completed}/5 reps, PeakVz={env1.max_vz:.2f} m/s)")
+    ax.plot(t_list, comz2, "r-", lw=2.2, label=f"Mode 2 Young MTG ({env2.reps_completed}/5 reps, PeakVz={env2.max_vz:.2f} m/s)")
+    ax.plot(t_list, comz3, color="purple", lw=2.2, label=f"Mode 2 Elderly MTG ({env3.reps_completed}/5 reps, PeakVz={env3.max_vz:.2f} m/s)")
+    t_zs = np.linspace(0.0, steps_zs * 0.02, len(z_zs))
+    ax.plot(t_zs, z_zs, color="crimson", linestyle="-.", lw=1.4, label=f"Zero-Shot Young on Elderly ({env_zs.reps_completed}/5 reps)")
+    ax.axhline(env1.com_stand[2], color="green", ls=":", lw=1.2, label="Standing CoM Target (0.937 m)")
+    ax.axhline(env1.com_sit[2], color="saddlebrown", ls=":", lw=1.2, label="Seated CoM Target (0.690 m)")
+    ax.set_title(f"{exp_title}: Un-Time-Bounded CoM Height z(t)", fontweight="bold")
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("Whole-Body CoM Height z (m)")
+    ax.legend(loc="lower right", fontsize=8)
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(plot_path, dpi=200)
+    plt.close()
+    print(f"[DONE] Saved CoM Trajectory Plot: {plot_path}")
 
 
 # -----------------------------------------------------------------------------
@@ -2771,8 +3411,66 @@ def main():
         max_steps=75
     )
 
+    # =========================================================================
+    # EXPERIMENT 6: UN-TIME-BOUNDED CoM-TRACKED 5-TIMES SIT-TO-STAND (5xSTS)
+    # =========================================================================
+    print("\n" + "#" * 78)
+    print("   EXPERIMENT 6: 5-TIMES SIT-TO-STAND (CoM-TRACKED + SPEED + SURVIVAL)")
+    print("#" * 78)
+
+    sts5_clip = MotionClip.load("motions/CeTI_5xSTS_subK1.npz")
+    ckpt_sts5_m1 = "checkpoints/exp6_5xsts_com_mode1.pt"
+    ckpt_sts5_m2_young = "checkpoints/exp6_5xsts_com_mode2_young.pt"
+    ckpt_sts5_m2_elderly = "checkpoints/exp6_5xsts_com_mode2_elderly.pt"
+
+    policy_sts5_m1 = make_sts_policy(obs_dim=64, device=device)
+    if load_sts_policy_checkpoint(policy_sts5_m1, ckpt_sts5_m1, device=device):
+        print(f"  [Loaded Exp 6 Mode 1 from {ckpt_sts5_m1}]")
+    else:
+        env_sts5_m1 = VectorFiveTimesSTSCoMEnv(sts5_clip, num_envs=64, mode="mode1", mtg_phase="none", max_steps=260, is_train=True)
+        policy_sts5_m1 = train_ppo_loop(env_sts5_m1, policy_sts5_m1, num_iters=45, lr=2.5e-4, label="Exp6-5xSTS-CoM-M1")
+        save_sts_policy_checkpoint(policy_sts5_m1, ckpt_sts5_m1)
+
+    policy_sts5_m2_young = make_sts_policy(obs_dim=64, device=device)
+    if load_sts_policy_checkpoint(policy_sts5_m2_young, ckpt_sts5_m2_young, device=device):
+        print(f"  [Loaded Exp 6 Mode 2 Young from {ckpt_sts5_m2_young}]")
+    else:
+        policy_sts5_m2_young.load_state_dict(policy_sts5_m1.state_dict())
+        with torch.no_grad():
+            policy_sts5_m2_young.log_std.clamp_(min=-1.7, max=-1.2)
+        env_sts5_y_soft = VectorFiveTimesSTSCoMEnv(sts5_clip, num_envs=64, mode="mode2", mtg_phase="soft", max_steps=260, is_train=True)
+        policy_sts5_m2_young = train_ppo_loop(env_sts5_y_soft, policy_sts5_m2_young, num_iters=15, lr=1.5e-4, label="Exp6-5xSTS-CoM-Young-Soft")
+        env_sts5_y_hard = VectorFiveTimesSTSCoMEnv(sts5_clip, num_envs=64, mode="mode2", mtg_phase="hard", max_steps=260, is_train=True)
+        policy_sts5_m2_young = train_ppo_loop(env_sts5_y_hard, policy_sts5_m2_young, num_iters=35, lr=1.2e-4, label="Exp6-5xSTS-CoM-Young-Hard")
+        save_sts_policy_checkpoint(policy_sts5_m2_young, ckpt_sts5_m2_young)
+
+    policy_sts5_m2_elderly = make_sts_policy(obs_dim=64, device=device)
+    if load_sts_policy_checkpoint(policy_sts5_m2_elderly, ckpt_sts5_m2_elderly, device=device):
+        print(f"  [Loaded Exp 6 Mode 2 Elderly from {ckpt_sts5_m2_elderly}]")
+    else:
+        policy_sts5_m2_elderly.load_state_dict(policy_sts5_m2_young.state_dict())
+        with torch.no_grad():
+            policy_sts5_m2_elderly.log_std.clamp_(min=-1.6, max=-1.1)
+        env_sts5_e_soft = VectorFiveTimesSTSCoMEnv(sts5_clip, num_envs=64, mode="mode2_elderly", mtg_phase="soft", max_steps=260, is_train=True)
+        policy_sts5_m2_elderly = train_ppo_loop(env_sts5_e_soft, policy_sts5_m2_elderly, num_iters=15, lr=1.5e-4, label="Exp6-5xSTS-CoM-Elderly-Soft")
+        env_sts5_e_hard = VectorFiveTimesSTSCoMEnv(sts5_clip, num_envs=64, mode="mode2_elderly", mtg_phase="hard", max_steps=260, is_train=True)
+        policy_sts5_m2_elderly = train_ppo_loop(env_sts5_e_hard, policy_sts5_m2_elderly, num_iters=40, lr=1.2e-4, label="Exp6-5xSTS-CoM-Elderly-Hard")
+        save_sts_policy_checkpoint(policy_sts5_m2_elderly, ckpt_sts5_m2_elderly)
+
+    evaluate_500hz_5xsts_com_experiment(
+        exp_title="EXP 6: 5xSTS (CoM-TRACKED, UN-TIME-BOUNDED)",
+        clip=sts5_clip,
+        policy1=policy_sts5_m1,
+        policy2_young=policy_sts5_m2_young,
+        policy2_elderly=policy_sts5_m2_elderly,
+        gif_path="renders/exp6_5x_sts_overlay.gif",
+        plot_path="renders/exp6_5x_sts_torque_limits.png",
+        max_steps=600,
+        render_stride=2
+    )
+
     print("\n" + "=" * 78)
-    print("   ALL 5 EXPERIMENTS (WALK, 2 m/s RUN, 5 m/s RUN, MAX JUMP, SIT-TO-STAND) COMPLETE!")
+    print("   ALL 6 EXPERIMENTS (WALK, 2 m/s RUN, 5 m/s RUN, MAX JUMP, STS, 5xSTS) COMPLETE!")
     print("=" * 78)
 
 

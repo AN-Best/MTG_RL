@@ -26,22 +26,19 @@
     <!-- Ground Plane at z = 0 (bitmask 1) -->
     <geom name="floor" type="plane" pos="0 0 0" size="100 100 0.1" material="grid_mat" contype="1" conaffinity="1"/>
 
-    <!-- Physical Sit-to-Stand Chair (bitmask 2/4 collides cleanly with pelvis_geom) -->
+    <!-- Physical Sit-to-Stand Chair (backless stool, bitmask 2/4 collides with pelvis & thighs) -->
     <body name="chair" pos="0 0 0">
-      <!-- Seat surface top at z = 0.573 m, spanning x in [-0.46, -0.22] m directly under seated pelvis (x = -0.292 m) -->
-      <geom name="chair_seat" type="box" pos="-0.34 0 0.553" size="0.12 0.22 0.020"
+      <!-- Seat surface top at z = 0.535 m, spanning x in [-0.54, -0.22] m -->
+      <geom name="chair_seat" type="box" pos="-0.38 0 0.515" size="0.16 0.22 0.020"
             material="chair_wood" contype="2" conaffinity="4" friction="1.8 0.02 0.001"/>
       <!-- Rounded front lip of chair seat at x = -0.22 m -->
-      <geom name="chair_front_lip" type="capsule" fromto="-0.22 -0.20 0.553 -0.22 0.20 0.553" size="0.020"
+      <geom name="chair_front_lip" type="capsule" fromto="-0.22 -0.20 0.515 -0.22 0.20 0.515" size="0.020"
             material="chair_wood" contype="2" conaffinity="4" friction="1.8 0.02 0.001"/>
-      <!-- Backrest support at x = -0.45 m -->
-      <geom name="chair_backrest" type="box" pos="-0.45 0 0.78" size="0.015 0.20 0.14"
-            material="chair_wood" contype="2" conaffinity="4"/>
-      <!-- 4 Chair Legs & Back Posts (visual) -->
-      <geom name="chair_leg_fl" type="capsule" fromto="-0.23  0.19 0.0 -0.23  0.19 0.54" size="0.016" material="chair_frame" contype="0" conaffinity="0"/>
-      <geom name="chair_leg_fr" type="capsule" fromto="-0.23 -0.19 0.0 -0.23 -0.19 0.54" size="0.016" material="chair_frame" contype="0" conaffinity="0"/>
-      <geom name="chair_leg_bl" type="capsule" fromto="-0.45  0.19 0.0 -0.45  0.19 0.90" size="0.016" material="chair_frame" contype="0" conaffinity="0"/>
-      <geom name="chair_leg_br" type="capsule" fromto="-0.45 -0.19 0.0 -0.45 -0.19 0.90" size="0.016" material="chair_frame" contype="0" conaffinity="0"/>
+      <!-- 4 Chair Legs (visual) -->
+      <geom name="chair_leg_fl" type="capsule" fromto="-0.23  0.19 0.0 -0.23  0.19 0.50" size="0.016" material="chair_frame" contype="0" conaffinity="0"/>
+      <geom name="chair_leg_fr" type="capsule" fromto="-0.23 -0.19 0.0 -0.23 -0.19 0.50" size="0.016" material="chair_frame" contype="0" conaffinity="0"/>
+      <geom name="chair_leg_bl" type="capsule" fromto="-0.52  0.19 0.0 -0.52  0.19 0.50" size="0.016" material="chair_frame" contype="0" conaffinity="0"/>
+      <geom name="chair_leg_br" type="capsule" fromto="-0.52 -0.19 0.0 -0.52 -0.19 0.50" size="0.016" material="chair_frame" contype="0" conaffinity="0"/>
     </body>
 
     <!-- Floating Pelvis Base (2D Planar: X slide, Z slide, Y-pitch hinge) -->
@@ -64,7 +61,7 @@
       <body name="thigh_l" pos="0 0.05 0">
         <joint name="q_lh" type="hinge" axis="0 1 0" range="-1.5 0.8"/>
         <inertial pos="0 0 -0.20" mass="8.5" diaginertia="0.09 0.15 0.09"/>
-        <geom name="thigh_l_geom" type="capsule" fromto="0 0 0 0 0 -0.42" size="0.045" rgba="1.0 0.5 0.05 1" contype="0" conaffinity="0"/>
+        <geom name="thigh_l_geom" type="capsule" fromto="0 0 0 0 0 -0.42" size="0.045" rgba="1.0 0.5 0.05 1" contype="4" conaffinity="2"/>
 
         <body name="shank_l" pos="0 0 -0.45">
           <!-- Human knee flexion axis: 0 -1 0 (negative angle flexes shank backward -X) -->
@@ -90,7 +87,7 @@
       <body name="thigh_r" pos="0 -0.05 0">
         <joint name="q_rh" type="hinge" axis="0 1 0" range="-1.5 0.8"/>
         <inertial pos="0 0 -0.20" mass="8.5" diaginertia="0.09 0.15 0.09"/>
-        <geom name="thigh_r_geom" type="capsule" fromto="0 0 0 0 0 -0.42" size="0.045" rgba="0.17 0.63 0.17 1" contype="0" conaffinity="0"/>
+        <geom name="thigh_r_geom" type="capsule" fromto="0 0 0 0 0 -0.42" size="0.045" rgba="0.17 0.63 0.17 1" contype="4" conaffinity="2"/>
 
         <body name="shank_r" pos="0 0 -0.45">
           <!-- Human knee flexion axis: 0 -1 0 (negative angle flexes shank backward -X) -->

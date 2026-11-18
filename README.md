@@ -257,15 +257,16 @@ To compare how unconstrained PD control, Healthy Young Millard MTG, and Walking-
 
 ![Experiment 7 Walking Foot Slip Analysis](renders/exp7_walk_slip_analysis.png)
 
-#### Experiment 7B: Slip-Perturbation Training (`SlipWalkTrackingEnv`, `60` iters with `550–820 N` random slips)
-Training all three policies (`60` iters each in `3 × 20` blocks with upright-recovery shaping and best-checkpoint selection, saved to `checkpoints/exp7_walk_slip_{ideal,young,elderly}.pt`):
-- **At `+700 N` Right-Foot Slip** (`renders/exp7_walk_slip_700N_overlay.gif`, `renders/exp7_walk_slip_700N_analysis.png`) — where pre-training Elderly fell at `149/180` steps:
-  - **ALL THREE models avoid falling (`180/180` steps, `3.60 s`, `Fell = False`)**:
-    - **Ideal (Unlimited PD)**: `Peak Pitch = 33.5°`, `Min Z = 0.82 m`, `End X = 5.32 m`.
-    - **Healthy Young (Millard MTG)**: `Peak Pitch = 26.6°` (dips only to `+5°`), `Min Z = 0.83 m`, `End X = 4.77 m`, `Mean Act^2 = 0.074`.
-    - **Elderly (Millard MTG)**: `Peak Pitch = 19.2°` (dips backward to `-2.5°` at `t = 1.55 s` and slows to `0.9 m/s`, recruiting a `+123 N*m` corrective knee torque spike with `Mean Act^2 = 0.107`, `+44.6%` higher effort than Young) before recovering upright walking (`Min Z = 0.85 m`, `End X = 4.53 m`).
-- **At `+720 N` Right-Foot Slip** (`renders/exp7_walk_slip_trained_overlay.gif`, `renders/exp7_walk_slip_trained_analysis.png`):
-  - **Ideal** (`180/180`, `Fell = False`, `Peak Pitch = 36.7°`, `End X = 5.30 m`) and **Young** (`180/180`, `Fell = False`, `Peak Pitch = 24.3°`, `Min Z = 0.83 m`, `End X = 4.65 m`, `Mean Act^2 = 0.076`) both recover cleanly, while **Elderly** extends survival from `76/180` → **`115/180` steps (`2.30 s`)** before reaching its physical MTG ceiling.
+#### Experiment 7B: Elderly Slip-Perturbation Compensation (`SlipWalkTrackingEnv`)
+After `60` iterations of slip-perturbation training (`550–820 N` random foot slips with upright-recovery shaping, `checkpoints/exp7_walk_slip_elderly.pt`):
+- **At `+700 N` Right-Foot Slip** (`t = 1.24–1.40 s`, `renders/exp7_walk_slip_700N_overlay.gif`, `renders/exp7_walk_slip_700N_analysis.png`):
+  - **Before slip training**: Elderly **falls** at `149/180` steps (`2.98 s`, `Peak Pitch = 31.0°`, `Min Z = 0.72 m`).
+  - **After slip training**: Elderly **avoids falling (`180/180` steps, `3.60 s`, `Fell = False`)** — dips backward to `-2.5°` at `t = 1.55 s` (`Peak Pitch = 19.2°`) and slows to `0.9 m/s`, recruiting a `+123 N*m` corrective knee torque spike (`Mean Act^2 = 0.107`), then recovers upright walking (`Min Z = 0.85 m`, `End X = 4.53 m`).
+- **At `+720 N` Right-Foot Slip**: Elderly extends survival from `76/180` (`1.52 s`) → **`115/180` steps (`2.30 s`)** (`Peak Pitch = 35.3°`, `Min Z = 0.67 m`, `Mean Act^2 = 0.206`) before hitting its biological MTG torque limit.
+
+![Experiment 7B Elderly Slip-Trained Overlay](renders/exp7_walk_slip_700N_overlay.gif)
+
+![Experiment 7B Elderly Slip-Trained Analysis](renders/exp7_walk_slip_700N_analysis.png)
 
 ---
 

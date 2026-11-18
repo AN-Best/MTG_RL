@@ -3161,6 +3161,333 @@ def evaluate_500hz_5xsts_com_experiment(
 
 
 # -----------------------------------------------------------------------------
+# Experiment 7: Walking Foot-Slip Perturbation (Ideal vs Young vs Elderly)
+# -----------------------------------------------------------------------------
+class ElderlyWalkTrackingEnv(StableTrackingEnv):
+    """Walking imitation environment with ElderlyMTGClampedActuator ('mtg_elderly')."""
+    def __init__(self, clip, mode="mode2_elderly", mtg_phase="hard", decimation=10, max_steps=300):
+        super().__init__(clip, mode="mode2", mtg_phase=mtg_phase, decimation=decimation, max_steps=max_steps)
+        from Biped_Actuators import create_actuator
+        ref_act = create_actuator("mtg_elderly", device="cpu")
+        if mtg_phase != "soft":
+            self.env.actuator = create_actuator("mtg_elderly", device=self.env.device)
+            self.env.actuator_type = "mtg_elderly"
+        self.T_max_pos = ref_act.T_max_pos_np.copy()
+        self.T_max_neg = ref_act.T_max_neg_np.copy()
+        self.q_opt = ref_act.q_opt_np.copy()
+        self.w = ref_act.w_np.copy()
+        self.u_max_pos = ref_act.u_max_pos_np.copy()
+        self.u_max_neg = ref_act.u_max_neg_np.copy()
+        self.k1_pass = ref_act.k1_pass_np.copy()
+        self.k2_pass = ref_act.k2_pass_np.copy()
+        self.q1_pass = ref_act.q1_pass_np.copy()
+        self.q2_pass = ref_act.q2_pass_np.copy()
+        self.tau_act = ref_act.tau_act
+        self.tau_deact = ref_act.tau_deact
+        self.a_min = ref_act.a_min
+        self.a_init = ref_act.a_init
+        self.a_soft = np.full(7, self.a_init, dtype=np.float32)
+
+    def set_mtg_phase(self, phase):
+        self.mtg_phase = phase
+        new_actuator = "ideal_unlimited" if phase == "soft" else "mtg_elderly"
+        from Biped_Actuators import create_actuator
+        self.env.actuator = create_actuator(new_actuator, device=self.env.device)
+        self.env.actuator_type = new_actuator
+
+
+class VectorElderlyWalkEnv:
+    def __init__(self, clip, num_envs=64, mtg_phase="hard", max_steps=300):
+        self.num_envs = num_envs
+        self.envs = [ElderlyWalkTrackingEnv(clip, mtg_phase=mtg_phase, max_steps=max_steps) for _ in range(num_envs)]
+        self.obs_dim = 64
+
+    def reset(self):
+        return np.stack([e.reset() for e in self.envs], axis=0)
+
+    def step(self, actions):
+        obs_l, rew_l, done_l, pe_l, pte_l, ex_l = [], [], [], [], [], []
+        for i, env in enumerate(self.envs):
+            o, r, d, inf = env.step(actions[i])
+            if d:
+                o = env.reset()
+            obs_l.append(o)
+            rew_l.append(r)
+            done_l.append(d)
+            pe_l.append(inf.get("pose_err", 0.0))
+            pte_l.append(inf.get("pitch_err", 0.0))
+            ex_l.append(inf.get("mtg_excess", 0.0))
+        return (
+            np.stack(obs_l, axis=0),
+            np.array(rew_l, dtype=np.float32),
+            np.array(done_l, dtype=bool),
+            {
+                "pose_err": float(np.mean(pe_l)),
+                "pitch_err": float(np.mean(pte_l)),
+                "mtg_excess": float(np.mean(ex_l)),
+            },
+        )
+
+
+class SlipWalkTrackingEnv(ElderlyWalkTrackingEnv):
+    """Walking imitation env with random stance-foot forward slip impulses during training."""
+    def __init__(self, clip, mode="mode2_elderly", mtg_phase="hard", decimation=10, max_steps=300,
+                 enable_foot_slip=True, slip_prob=0.04, slip_force_range=(550.0, 820.0)):
+        if mode in ("mode1", "ideal_unlimited", "unlimited"):
+            StableTrackingEnv.__init__(self, clip, mode="mode1", mtg_phase="hard", decimation=decimation, max_steps=max_steps)
+            self.is_elderly_walk = False
+        elif mode in ("mode2", "mtg_clamped", "young"):
+            StableTrackingEnv.__init__(self, clip, mode="mode2", mtg_phase=mtg_phase, decimation=decimation, max_steps=max_steps)
+            self.is_elderly_walk = False
+        else:
+            super().__init__(clip, mode="mode2_elderly", mtg_phase=mtg_phase, decimation=decimation, max_steps=max_steps)
+            self.is_elderly_walk = True
+
+        self.enable_foot_slip = bool(enable_foot_slip)
+        self.slip_prob = float(slip_prob)
+        self.slip_force_range = slip_force_range
+        self.foot_r_body_id = mujoco.mj_name2id(self.env.model, mujoco.mjtObj.mjOBJ_BODY, "foot_r")
+        self.foot_l_body_id = mujoco.mj_name2id(self.env.model, mujoco.mjtObj.mjOBJ_BODY, "foot_l")
+        self.slip_remaining_steps = 0
+        self.slip_force_curr = 0.0
+        self.slip_body_id = self.foot_r_body_id
+
+    def reset(self, start_frame=None):
+        self.slip_remaining_steps = 0
+        self.slip_force_curr = 0.0
+        return super().reset(start_frame=start_frame)
+
+    def step(self, action):
+        if self.enable_foot_slip:
+            self.env.data.xfrc_applied[self.foot_r_body_id, 0] = 0.0
+            self.env.data.xfrc_applied[self.foot_l_body_id, 0] = 0.0
+            if self.slip_remaining_steps > 0:
+                self.env.data.xfrc_applied[self.slip_body_id, 0] = self.slip_force_curr
+                self.slip_remaining_steps -= 1
+            elif self.step_count > 8 and np.random.rand() < self.slip_prob:
+                self.slip_force_curr = float(np.random.uniform(self.slip_force_range[0], self.slip_force_range[1]))
+                self.slip_remaining_steps = int(np.random.randint(6, 10))
+                self.slip_body_id = self.foot_r_body_id if np.random.rand() < 0.7 else self.foot_l_body_id
+                self.env.data.xfrc_applied[self.slip_body_id, 0] = self.slip_force_curr
+        obs, reward, done, info = super().step(action)
+        if info.get("fell", False):
+            reward = -3.0
+        else:
+            torso_rad = float(self.env.data.qpos[2] + self.env.data.qpos[3])
+            r_upright = float(np.exp(-6.0 * (torso_rad - 0.22)**2))
+            reward = float(reward + 0.25 * r_upright + 0.15)
+        return obs, reward, done, info
+
+
+class VectorSlipWalkEnv:
+    def __init__(self, clip, num_envs=64, mode="mode2_elderly", mtg_phase="hard", max_steps=300):
+        self.num_envs = num_envs
+        self.envs = [SlipWalkTrackingEnv(clip, mode=mode, mtg_phase=mtg_phase, max_steps=max_steps) for _ in range(num_envs)]
+        self.obs_dim = 64
+
+    def reset(self):
+        return np.stack([e.reset() for e in self.envs], axis=0)
+
+    def step(self, actions):
+        obs_l, rew_l, done_l, pe_l, pte_l, ex_l = [], [], [], [], [], []
+        for i, env in enumerate(self.envs):
+            o, r, d, inf = env.step(actions[i])
+            if d:
+                o = env.reset()
+            obs_l.append(o)
+            rew_l.append(r)
+            done_l.append(d)
+            pe_l.append(inf.get("pose_err", 0.0))
+            pte_l.append(inf.get("pitch_err", 0.0))
+            ex_l.append(inf.get("mtg_excess", 0.0))
+        return (
+            np.stack(obs_l, axis=0),
+            np.array(rew_l, dtype=np.float32),
+            np.array(done_l, dtype=bool),
+            {
+                "pose_err": float(np.mean(pe_l)),
+                "pitch_err": float(np.mean(pte_l)),
+                "mtg_excess": float(np.mean(ex_l)),
+            },
+        )
+
+
+def evaluate_500hz_walk_slip_experiment(
+    exp_title,
+    clip,
+    policy_ideal,
+    policy_young,
+    policy_elderly,
+    gif_path,
+    plot_path,
+    slip_force=320.0,
+    slip_start_step=62,
+    slip_duration_steps=8,
+    max_steps=180,
+    render_stride=1,
+):
+    print("\n" + "=" * 78)
+    print(f"   500 Hz EVALUATION & RENDERING: {exp_title}")
+    print(f"   Slip Perturbation: +{slip_force:.0f} N forward on right foot (steps {slip_start_step}..{slip_start_step + slip_duration_steps - 1}, t={slip_start_step*0.02:.2f}..{(slip_start_step+slip_duration_steps)*0.02:.2f}s)")
+    print("=" * 78)
+
+    env1 = StableTrackingEnv(clip, mode="mode1", mtg_phase="hard", max_steps=max_steps)
+    env2 = StableTrackingEnv(clip, mode="mode2", mtg_phase="hard", max_steps=max_steps)
+    env3 = ElderlyWalkTrackingEnv(clip, mtg_phase="hard", max_steps=max_steps)
+
+    foot_r_id1 = mujoco.mj_name2id(env1.env.model, mujoco.mjtObj.mjOBJ_BODY, "foot_r")
+    foot_r_id2 = mujoco.mj_name2id(env2.env.model, mujoco.mjtObj.mjOBJ_BODY, "foot_r")
+    foot_r_id3 = mujoco.mj_name2id(env3.env.model, mujoco.mjtObj.mjOBJ_BODY, "foot_r")
+
+    obs1 = env1.reset(start_frame=0)
+    obs2 = env2.reset(start_frame=0)
+    obs3 = env3.reset(start_frame=0)
+
+    overlay_model = mujoco.MjModel.from_xml_path("biped_overlay_jump.xml")
+    overlay_data = mujoco.MjData(overlay_model)
+    renderer = mujoco.Renderer(overlay_model, height=540, width=960)
+    camera = mujoco.MjvCamera()
+    mujoco.mjv_defaultCamera(camera)
+    camera.distance = 3.20
+    camera.azimuth = 90.0
+    camera.elevation = -12.0
+
+    t_list = []
+    vx1, vx2, vx3 = [], [], []
+    pitch1, pitch2, pitch3 = [], [], []
+    pz1, pz2, pz3 = [], [], []
+    knee_tau1, knee_tau2, knee_tau3 = [], [], []
+    act1_list, act2_list, act3_list = [], [], []
+    frames = []
+
+    done1 = done2 = done3 = False
+    fell1 = fell2 = fell3 = False
+    s1 = s2 = s3 = 0
+
+    for step in range(max_steps):
+        if done1 and done2 and done3:
+            break
+
+        slip_active = (slip_start_step <= step < slip_start_step + slip_duration_steps)
+        f_apply = float(slip_force) if slip_active else 0.0
+
+        env1.env.data.xfrc_applied[foot_r_id1, 0] = f_apply if not done1 else 0.0
+        env2.env.data.xfrc_applied[foot_r_id2, 0] = f_apply if not done2 else 0.0
+        env3.env.data.xfrc_applied[foot_r_id3, 0] = f_apply if not done3 else 0.0
+
+        with torch.no_grad():
+            a1 = policy_ideal.get_action(obs1, deterministic=True)[0].cpu().numpy() if not done1 else np.zeros(7)
+            a2 = policy_young.get_action(obs2, deterministic=True)[0].cpu().numpy() if not done2 else np.zeros(7)
+            a3 = policy_elderly.get_action(obs3, deterministic=True)[0].cpu().numpy() if not done3 else np.zeros(7)
+
+        if not done1:
+            obs1, _, d1, inf1 = env1.step(a1)
+            s1 += 1
+            fell1 = fell1 or bool(inf1.get("fell", False))
+            done1 = d1
+            act1_list.append(float(np.mean(a1**2)))
+        if not done2:
+            obs2, _, d2, inf2 = env2.step(a2)
+            s2 += 1
+            fell2 = fell2 or bool(inf2.get("fell", False))
+            done2 = d2
+            act2_list.append(float(np.mean(env2.env.actuator.last_a**2)))
+        if not done3:
+            obs3, _, d3, inf3 = env3.step(a3)
+            s3 += 1
+            fell3 = fell3 or bool(inf3.get("fell", False))
+            done3 = d3
+            act3_list.append(float(np.mean(env3.env.actuator.last_a**2)))
+
+        t_list.append((step + 1) * 0.02)
+        vx1.append(float(env1.env.data.qvel[0]))
+        vx2.append(float(env2.env.data.qvel[0]))
+        vx3.append(float(env3.env.data.qvel[0]))
+        pitch1.append(float(np.degrees(env1.env.data.qpos[2] + env1.env.data.qpos[3])))
+        pitch2.append(float(np.degrees(env2.env.data.qpos[2] + env2.env.data.qpos[3])))
+        pitch3.append(float(np.degrees(env3.env.data.qpos[2] + env3.env.data.qpos[3])))
+        pz1.append(float(env1.env.data.qpos[1]))
+        pz2.append(float(env2.env.data.qpos[1]))
+        pz3.append(float(env3.env.data.qpos[1]))
+        knee_tau1.append(float(env1.env.data.qfrc_actuator[8]))
+        knee_tau2.append(float(env2.env.data.qfrc_actuator[8]))
+        knee_tau3.append(float(env3.env.data.qfrc_actuator[8]))
+
+        if step % render_stride == 0 or step == max_steps - 1:
+            q1_vis = env1.env.data.qpos[:10].copy()
+            q2_vis = env2.env.data.qpos[:10].copy()
+            q3_vis = env3.env.data.qpos[:10].copy()
+            overlay_data.qpos[:10] = q1_vis
+            overlay_data.qpos[10:20] = q2_vis
+            overlay_data.qpos[20:30] = q3_vis
+            mujoco.mj_forward(overlay_model, overlay_data)
+
+            camera.lookat[0] = float(np.mean([q1_vis[0], q2_vis[0], q3_vis[0]]))
+            camera.lookat[1] = 0.0
+            camera.lookat[2] = 0.85
+            renderer.update_scene(overlay_data, camera)
+            rgb = renderer.render()
+            pil_img = Image.fromarray(rgb)
+            draw = ImageDraw.Draw(pil_img)
+            slip_tag = f" | [SLIP +{slip_force:.0f}N ON RIGHT FOOT]" if slip_active else ""
+            text_str = (
+                f"{exp_title} (t={step*0.02:.2f}s){slip_tag}\n"
+                f"Cyan: Ideal ({'FELL' if fell1 else 'OK'}) | "
+                f"Orange: Young MTG ({'FELL' if fell2 else 'OK'}) | "
+                f"Purple: Elderly MTG ({'FELL' if fell3 else 'OK'})"
+            )
+            draw.rectangle([10, 10, 950, 56], fill=(220, 40, 40) if slip_active else (15, 15, 25))
+            draw.text((18, 16), text_str, fill=(255, 255, 255))
+            frames.append(pil_img)
+
+    env1.env.data.xfrc_applied[:] = 0.0
+    env2.env.data.xfrc_applied[:] = 0.0
+    env3.env.data.xfrc_applied[:] = 0.0
+
+    if frames:
+        frames[0].save(gif_path, save_all=True, append_images=frames[1:], duration=30, loop=0)
+        print(f"[DONE] Saved Overlay GIF: {gif_path}")
+
+    print(f"  Ideal (Unlimited PD)  : Steps={s1}/{max_steps} ({s1*0.02:.2f}s) | Fell={fell1} | PeakPitch={max(abs(np.array(pitch1))):.1f}deg | MinZ={min(pz1):.2f}m | EndX={env1.env.data.qpos[0]:.2f}m")
+    print(f"  Young (Millard MTG)   : Steps={s2}/{max_steps} ({s2*0.02:.2f}s) | Fell={fell2} | PeakPitch={max(abs(np.array(pitch2))):.1f}deg | MinZ={min(pz2):.2f}m | EndX={env2.env.data.qpos[0]:.2f}m | MeanAct2={np.mean(act2_list):.3f}")
+    print(f"  Elderly (Millard MTG) : Steps={s3}/{max_steps} ({s3*0.02:.2f}s) | Fell={fell3} | PeakPitch={max(abs(np.array(pitch3))):.1f}deg | MinZ={min(pz3):.2f}m | EndX={env3.env.data.qpos[0]:.2f}m | MeanAct2={np.mean(act3_list):.3f}")
+
+    t_arr = np.array(t_list)
+    t_slip0, t_slip1 = slip_start_step * 0.02, (slip_start_step + slip_duration_steps) * 0.02
+
+    fig, axes = plt.subplots(3, 1, figsize=(11, 9), sharex=True)
+    for ax in axes:
+        ax.axvspan(t_slip0, t_slip1, color="crimson", alpha=0.16, label="Foot Slip (+Fx)" if ax is axes[0] else None)
+
+    axes[0].plot(t_arr, vx1, "b--", lw=1.8, label=f"Ideal Unlimited (Fell={fell1})")
+    axes[0].plot(t_arr, vx2, "r-", lw=2.0, label=f"Young Millard MTG (Fell={fell2})")
+    axes[0].plot(t_arr, vx3, color="purple", lw=2.0, label=f"Elderly Millard MTG (Fell={fell3})")
+    axes[0].set_ylabel("Pelvis Vx (m/s)")
+    axes[0].set_title(f"{exp_title}: Forward Velocity, Trunk Pitch & Right Knee Torque Under +{slip_force:.0f} N Foot Slip", fontweight="bold")
+    axes[0].legend(loc="lower left", fontsize=8)
+    axes[0].grid(True, alpha=0.3)
+
+    axes[1].plot(t_arr, pitch1, "b--", lw=1.8)
+    axes[1].plot(t_arr, pitch2, "r-", lw=2.0)
+    axes[1].plot(t_arr, pitch3, color="purple", lw=2.0)
+    axes[1].set_ylabel("Trunk Pitch (deg)")
+    axes[1].grid(True, alpha=0.3)
+
+    axes[2].plot(t_arr, knee_tau1, "b--", lw=1.8, label="Ideal Knee Torque")
+    axes[2].plot(t_arr, knee_tau2, "r-", lw=2.0, label="Young MTG Knee Torque")
+    axes[2].plot(t_arr, knee_tau3, color="purple", lw=2.0, label="Elderly MTG Knee Torque")
+    axes[2].set_ylabel("Right Knee Torque (N*m)")
+    axes[2].set_xlabel("Time (s)")
+    axes[2].legend(loc="lower right", fontsize=8)
+    axes[2].grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(plot_path, dpi=200)
+    plt.close()
+    print(f"[DONE] Saved Slip Analysis Plot: {plot_path}")
+
+
+# -----------------------------------------------------------------------------
 # Main Suite Runner
 # -----------------------------------------------------------------------------
 def main():
@@ -3469,8 +3796,42 @@ def main():
         render_stride=2
     )
 
+    # =========================================================================
+    # EXPERIMENT 7: WALKING FOOT-SLIP PERTURBATION (IDEAL vs YOUNG vs ELDERLY)
+    # =========================================================================
+    print("\n" + "#" * 78)
+    print("   EXPERIMENT 7: WALKING FOOT-SLIP PERTURBATION (IDEAL vs YOUNG vs ELDERLY)")
+    print("#" * 78)
+    ckpt_walk_elderly = "checkpoints/exp7_walk_elderly.pt"
+    policy_walk_elderly = StableTrackingPolicy(obs_dim=64, action_dim=7, device=device)
+    if os.path.exists(ckpt_walk_elderly):
+        policy_walk_elderly.load_state_dict(torch.load(ckpt_walk_elderly, map_location=device))
+        print(f"  [Loaded Exp 7 Elderly Walking from {ckpt_walk_elderly}]")
+    else:
+        policy_walk_elderly.load_state_dict(policy_walk_m2.state_dict())
+        env_w3_soft = VectorElderlyWalkEnv(clip_walk, num_envs=64, mtg_phase="soft")
+        policy_walk_elderly = train_ppo_loop(env_w3_soft, policy_walk_elderly, num_iters=10, lr=1.2e-4, label="Exp7-Walk-Elderly-Soft")
+        env_w3_hard = VectorElderlyWalkEnv(clip_walk, num_envs=64, mtg_phase="hard")
+        policy_walk_elderly = train_ppo_loop(env_w3_hard, policy_walk_elderly, num_iters=25, lr=8.0e-5, label="Exp7-Walk-Elderly-Hard")
+        torch.save(policy_walk_elderly.state_dict(), ckpt_walk_elderly)
+
+    evaluate_500hz_walk_slip_experiment(
+        exp_title="EXP 7: WALKING FOOT SLIP (1.25 m/s)",
+        clip=clip_walk,
+        policy_ideal=policy_walk_m1,
+        policy_young=policy_walk_m2,
+        policy_elderly=policy_walk_elderly,
+        gif_path="renders/exp7_walk_slip_overlay.gif",
+        plot_path="renders/exp7_walk_slip_analysis.png",
+        slip_force=720.0,
+        slip_start_step=62,
+        slip_duration_steps=8,
+        max_steps=180,
+        render_stride=1,
+    )
+
     print("\n" + "=" * 78)
-    print("   ALL 6 EXPERIMENTS (WALK, 2 m/s RUN, 5 m/s RUN, MAX JUMP, STS, 5xSTS) COMPLETE!")
+    print("   ALL 7 EXPERIMENTS (WALK, RUN20, RUN50, JUMP, STS, 5xSTS, SLIP) COMPLETE!")
     print("=" * 78)
 
 

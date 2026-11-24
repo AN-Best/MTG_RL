@@ -253,7 +253,7 @@ To compare how unconstrained PD control, Healthy Young Millard MTG, and Walking-
 - **Healthy Young Adult (Millard MTG, Orange in GIF)**: `180/180` steps (`3.60 s`), **`Fell = False`**, `Peak Pitch = 32.4°` (stumbles backward to `-32.4°` at `t ≈ 1.55 s`), `Min Z = 0.63 m`, `End X = 2.28 m`, `Mean Act^2 = 0.137` — hits `-145 N*m` corrective knee torque within MTG limits and recovers upright balance.
 - **Elderly Scaled Adult (Millard MTG, Purple in GIF, `checkpoints/exp7_walk_elderly.pt`)**: **`76/180` steps (`1.52 s`), `Fell = True`**, `Peak Pitch = 32.9°`, `Min Z = 0.73 m`, `End X = 2.07 m`, `Mean Act^2 = 0.155` — peaks at only `-98 N*m` knee torque during the slip and cannot arrest the backward fall.
 
-![Experiment 7 Walking Foot Slip 3-Model Overlay](renders/exp7_walk_slip_overlay.gif)
+![Experiment 7 Walking Foot Slip 3-Model Overlay](renders/exp7_walk_slip_trained_overlay.gif)
 
 ![Experiment 7 Walking Foot Slip Analysis](renders/exp7_walk_slip_analysis.png)
 

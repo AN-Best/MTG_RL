@@ -1,0 +1,24 @@
+% =============================================================================
+% Master Standalone Document: Reward Functions for Figures 2--6
+% Compile with: pdflatex all_rewards.tex
+% =============================================================================
+\documentclass[11pt]{article}
+\usepackage[margin=0.85in]{geometry}
+\usepackage{amsmath, amssymb}
+\usepackage{booktabs}
+
+\title{Reward Function Formulations for Experiments (Figures 2--6)}
+\date{}
+
+\begin{document}
+\maketitle
+
+\noindent Across all reinforcement learning tasks, $[x]_+ = \max(0, x)$ denotes the positive part, $\mathbf{q}_{j,t} \in \mathbb{R}^7$ and $\dot{\mathbf{q}}_{j,t} \in \mathbb{R}^7$ are the seven actuated joint angles and angular velocities (lumbar, left/right hip, knee, and ankle), $(x_t, z_t, \theta_{p,t})$ are the planar pelvis root coordinates, and $\mathbf{a}_t \in \mathbb{R}^7$ is the $50\;\mathrm{Hz}$ policy action.
+
+\input{fig2_walking_reward}
+\input{fig3_running_reward}
+\input{fig4_jump_reward}
+\input{fig5_5xsts_reward}
+\input{fig6_walk_slip_reward}
+
+\end{document}

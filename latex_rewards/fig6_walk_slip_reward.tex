@@ -1,0 +1,17 @@
+% =============================================================================
+% Reward Function — Figure 6 (Experiment 7: Walking Foot-Slip Perturbation)
+% Source: SlipWalkTrackingEnv.step() in run_all_experiments.py
+% =============================================================================
+\subsection*{Figure 6: Walking Foot-Slip Perturbation (\texttt{SlipWalkTrackingEnv})}
+
+During slip-perturbation training, random forward horizontal impulses $F_{\mathrm{slip}} \sim \mathcal{U}(550,\,820)\;\mathrm{N}$ are applied to a stance foot body (\texttt{foot\_r} with probability $0.7$, \texttt{foot\_l} with probability $0.3$) for $6$--$9$ control steps ($0.12$--$0.18\;\mathrm{s}$) at per-step onset probability $p_{\mathrm{slip}} = 0.04$ (for $t > 8$).
+
+The reward augments the baseline walking imitation reward $r_t^{\mathrm{walk}}$ (Figure~2) with an upright torso-recovery shaping bonus and a strong terminal fall penalty so policies prioritize arresting backward pitch over rigid joint tracking during a slip:
+\begin{equation}
+r_t^{\mathrm{slip}} =
+\begin{cases}
+-3.0, & \text{if } z_t < 0.45\;\mathrm{m} \;\lor\; |\theta_{p,t} - \theta_{p,t}^{\mathrm{ref}}| > 0.70\;\mathrm{rad}, \\[6pt]
+r_t^{\mathrm{walk}} + 0.25\,\exp\!\Bigl(-6.0\,(\theta_{\mathrm{torso},t} - 0.22)^2\Bigr) + 0.15, & \text{otherwise},
+\end{cases}
+\end{equation}
+where $\theta_{\mathrm{torso},t} = q_{2,t} + q_{3,t}$ is the world-frame trunk pitch angle (nominal forward walking lean $\approx 0.22\;\mathrm{rad} \approx 12.6^\circ$), and $r_t^{\mathrm{walk}}$ is the exact $50\;\mathrm{Hz}$ walking tracking reward from Figure~2 (with Mode~2 hard $500\;\mathrm{Hz}$ MTG clamping active for Young and Elderly policies, so $p_{\mathrm{MTG}} = 0$).

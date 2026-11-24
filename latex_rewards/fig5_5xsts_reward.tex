@@ -1,0 +1,57 @@
+% =============================================================================
+% Reward Function — Figure 5 (Experiment 6: Un-Time-Bounded 5-Times Sit-to-Stand)
+% Source: FiveTimesSTSCoMEnv.step() in run_all_experiments.py
+% =============================================================================
+\subsection*{Figure 5: Un-Time-Bounded CoM-Tracked 5-Times Sit-to-Stand (\texttt{FiveTimesSTSCoMEnv})}
+
+To allow Young and Elderly models to self-pace without a fixed wall-clock timer, the reference phase index $f_t$ advances by $\Delta f_t$ frames per $50\;\mathrm{Hz}$ step only when the whole-body center of mass $\mathbf{c}_t = (c_{x,t}, c_{z,t})$ is within tolerance of the reference CoM $\mathbf{c}^{\mathrm{ref}}(f_t)$ ($d_t = \lVert \mathbf{c}_t - \mathbf{c}^{\mathrm{ref}}(f_t) \rVert_2$):
+\begin{equation}
+\Delta f_t =
+\begin{cases}
+\mathrm{clip}\!\Bigl(\mathrm{round}\bigl(12\,(1 - d_t / 0.16)\bigr),\, 1,\, 12\Bigr), & d_t < 0.16\;\mathrm{m}, \\
+2, & d_t \in [0.16,\, 0.24)\;\mathrm{m} \;\land\; F_{\mathrm{chair},t} > 30\;\mathrm{N}, \\
+0, & \text{otherwise}.
+\end{cases}
+\end{equation}
+The per-step reward combines tight CoM tracing, loose joint guidance, CoM-gated phase progress, large repetition-completion bonuses, foot-plant and torso stability, a living offset ($-0.55$) to prevent sitting still, and a terminal fall penalty:
+\begin{equation}
+r_t^{\mathrm{5xSTS}} =
+\begin{cases}
+-5.0, & \text{if } \mathrm{fell}_t, \\[6pt]
+0.50\,r_{\mathrm{CoM}} + 0.25\,r_{\mathrm{pose}} + 0.85\,r_{\mathrm{prog}} + r_{\mathrm{rep}} + 0.15\,r_{\mathrm{foot}} + 0.20\,r_{\mathrm{stab}} - 0.55 + p_{\mathrm{far}} + p_{\mathrm{tip}} + p_{\mathrm{act}} + p_{\mathrm{eff}} + p_{\mathrm{MTG}}, & \text{otherwise},
+\end{cases}
+\end{equation}
+with $\theta_{\mathrm{torso},t} = q_{2,t} + q_{3,t}$, fall condition
+\begin{equation}
+\mathrm{fell}_t \iff \bigl(z_t < 0.45\;\mathrm{m}\bigr) \;\lor\; \bigl(\theta_{\mathrm{torso},t} < -0.65\;\mathrm{rad}\bigr) \;\lor\; \bigl(\theta_{\mathrm{torso},t} > 1.35\;\mathrm{rad}\bigr) \;\lor\; \bigl(c_{x,t} > 0.35\;\mathrm{m}\bigr) \;\lor\; \bigl(c_{x,t} < -0.45\;\mathrm{m}\bigr),
+\end{equation}
+and component terms:
+\begin{align}
+e_{\mathrm{CoM},t}^2 &= (c_{x,t} - c_x^{\mathrm{ref}})^2 + (c_{z,t} - c_z^{\mathrm{ref}})^2, \qquad
+r_{\mathrm{CoM}} = \exp(-150\,e_{\mathrm{CoM},t}^2), \qquad
+p_{\mathrm{far}} = -0.80\,\min(e_{\mathrm{CoM},t}^2,\, 0.25), \\
+r_{\mathrm{pose}} &= \exp\!\Bigl(-2.0\,\frac{1}{7}\lVert \mathbf{q}_{j,t} - \mathbf{q}_{j}^{\mathrm{ref}}(f_t) \rVert_2^2\Bigr), \qquad
+r_{\mathrm{prog}} = \frac{\Delta f_t}{10}, \\
+r_{\mathrm{rep}} &=
+\begin{cases}
++4.0, & \text{upon reaching standing dwell ($c_{z,t} \ge 0.88\;\mathrm{m},\; z_t \ge 0.85\;\mathrm{m}$) for reps 1--4}, \\
++8.0, & \text{upon completing sit-down dwell ($c_{z,t} \le 0.735\;\mathrm{m},\; F_{\mathrm{chair},t} > 30\;\mathrm{N}$) for reps 1--4}, \\
++10.0, & \text{upon reaching 5th standing dwell (clinical 5xSTS completion)}, \\
+0, & \text{otherwise},
+\end{cases} \\
+r_{\mathrm{foot}} &= \exp\!\Bigl(-20\,\bigl[(x_{L,t} - x_{\mathrm{foot}}^{\mathrm{ref}})^2 + (x_{R,t} - x_{\mathrm{foot}}^{\mathrm{ref}})^2\bigr]\Bigr), \\
+\epsilon_{\mathrm{torso},t} &= \bigl[|\theta_{\mathrm{torso},t} - 0.52| - 0.44\bigr]_+, \qquad
+r_{\mathrm{stab}} = \exp\!\bigl(-12\,\epsilon_{\mathrm{torso},t}^2 - 0.4\,\dot{\theta}_{\mathrm{torso},t}^2\bigr), \qquad
+p_{\mathrm{tip}} = -2.0\,\epsilon_{\mathrm{torso},t}^2, \\
+p_{\mathrm{act}} &= -0.02\,\lVert \tilde{\mathbf{a}}_t - \tilde{\mathbf{a}}_{t-1} \rVert_2^2, \qquad
+p_{\mathrm{eff}} =
+\begin{cases}
+-0.02\,\overline{a_m^2}, & \text{Mode 2}, \\
+0, & \text{Mode 1},
+\end{cases} \qquad
+p_{\mathrm{MTG}} =
+\begin{cases}
+-0.50\,\lVert \bar{\mathbf{e}}_{\mathrm{MTG},t} \rVert_2^2, & \text{Mode 2 (\texttt{soft})}, \\
+0, & \text{otherwise}.
+\end{cases}
+\end{align}

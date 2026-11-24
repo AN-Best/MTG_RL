@@ -1,0 +1,30 @@
+% =============================================================================
+% Reward Function — Figure 2 (Experiment 1: Walking Imitation at 1.25 m/s)
+% Source: StableTrackingEnv.step() in Stable_Motion_Tracker.py
+% =============================================================================
+\subsection*{Figure 2: Walking Imitation ($1.25\;\mathrm{m/s}$, \texttt{StableTrackingEnv})}
+
+At each $50\;\mathrm{Hz}$ control step, the reward combines an alive bonus, exponential joint/root/end-effector tracking kernels, an action-rate smoothness penalty, and (during Mode~2 Phase~1 soft curriculum) a quadratic normalized MTG torque-excess penalty:
+\begin{equation}
+r_t^{\mathrm{walk}} =
+\begin{cases}
+0, & \text{if } z_t < 0.45\;\mathrm{m} \;\lor\; |\theta_{p,t} - \theta_{p,t}^{\mathrm{ref}}| > 0.70\;\mathrm{rad}, \\[6pt]
+0.10 + 0.30\,r_q + 0.25\,r_{\mathrm{rot}} + 0.15\,r_{\mathrm{vel}} + 0.10\,r_x + 0.10\,r_z + 0.10\,r_{\mathrm{cart}} + p_{\mathrm{act}} + p_{\mathrm{MTG}}, & \text{otherwise},
+\end{cases}
+\end{equation}
+where the individual terms are defined as:
+\begin{align}
+r_q &= \exp\!\Bigl(-30\,\frac{1}{7}\lVert \mathbf{q}_{j,t} - \mathbf{q}_{j,t}^{\mathrm{ref}} \rVert_2^2\Bigr), \\
+r_{\mathrm{rot}} &= \exp\!\Bigl(-25\,(\theta_{p,t} - \theta_{p,t}^{\mathrm{ref}})^2 - 1.0\,(\dot{\theta}_{p,t} - \dot{\theta}_{p,t}^{\mathrm{ref}})^2\Bigr), \\
+r_{\mathrm{vel}} &= \exp\!\Bigl(-10\,(v_{x,t} - v_{x,t}^{\mathrm{ref}})^2\Bigr), \qquad
+r_x = \exp\!\Bigl(-5\,(x_t - x_t^{\mathrm{ref}})^2\Bigr), \qquad
+r_z = \exp\!\Bigl(-20\,(z_t - z_t^{\mathrm{ref}})^2\Bigr), \\
+r_{\mathrm{cart}} &= \exp\!\Bigl(-15\,\frac{1}{6}\lVert \mathbf{p}_{\mathrm{ee},t}^{\mathrm{rel}} - \mathbf{p}_{\mathrm{ee},t}^{\mathrm{rel,ref}} \rVert_2^2\Bigr), \\
+p_{\mathrm{act}} &= -0.01\,\lVert \mathbf{a}_t - \mathbf{a}_{t-1} \rVert_2^2, \\
+p_{\mathrm{MTG}} &=
+\begin{cases}
+-0.50\,\lVert \bar{\mathbf{e}}_{\mathrm{MTG},t} \rVert_2^2, & \text{Mode 2, Phase 1 (\texttt{soft})}, \\
+0, & \text{Mode 1 or Mode 2, Phase 2 (\texttt{hard})}.
+\end{cases}
+\end{align}
+Here $\mathbf{p}_{\mathrm{ee},t}^{\mathrm{rel}} \in \mathbb{R}^6$ stacks the pelvis-relative $(x, z)$ positions of the left sole, right sole, and trunk tip, and $\bar{\mathbf{e}}_{\mathrm{MTG},t} \in \mathbb{R}^7$ is the sub-step-averaged normalized biological torque excess over the dynamic MTG envelope.

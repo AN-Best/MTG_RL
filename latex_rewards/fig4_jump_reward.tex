@@ -1,0 +1,38 @@
+% =============================================================================
+% Reward Function — Figure 4 (Experiment 4: Maximum Vertical Jump)
+% Source: MaxJumpEnv.step() in run_all_experiments.py
+% =============================================================================
+\subsection*{Figure 4: Maximum Vertical Jump (\texttt{MaxJumpEnv}, Reference-Free RL)}
+
+Unlike motion imitation tasks, \texttt{MaxJumpEnv} maximizes vertical pelvis apex height above quiet standing ($z_{\mathrm{stand}} = 0.92\;\mathrm{m}$) without any reference trajectory, terminating two steps after apex ($\dot{z}_t \le 0$ post-takeoff) or upon falling:
+\begin{equation}
+r_t^{\mathrm{jump}} =
+\begin{cases}
+-1.5, & \text{if } z_t < 0.62\;\mathrm{m} \;\lor\; |\theta_{p,t}| > 0.55\;\mathrm{rad} \;\lor\; |x_t| > 0.75\;\mathrm{m}, \\[6pt]
+\bigl(r_{\mathrm{peak}} + r_{\mathrm{hold}} + r_{\mathrm{launch}}\bigr)\bigl(0.4 + 0.6\,m_{\mathrm{up}}\bigr) + 0.05\,m_{\mathrm{up}} + r_{\mathrm{apex}} + p_{\mathrm{sym}} + p_{\mathrm{act}} + p_{\mathrm{inj}} + p_{\mathrm{MTG}}, & \text{otherwise},
+\end{cases}
+\end{equation}
+where $z_{\max,t} = \max_{\tau \le t} z_\tau$, $z_{\min,t} = \min_{\tau \le t} z_\tau$, $\Delta z_{\max,t} = [z_{\max,t} - z_{\max,t-1}]_+$, $\Delta z_{\mathrm{gain},t} = [z_{\max,t} - z_{\mathrm{stand}}]_+$, and the ballistic apex estimate is $z_{\mathrm{bal},t} = z_t + \frac{[v_{z,t}]_+^2}{2g}$ ($g = 9.81\;\mathrm{m/s^2}$):
+\begin{align}
+r_{\mathrm{peak}} &= 55.0\,\Delta z_{\max,t}, \qquad
+r_{\mathrm{hold}} = 4.5\,\Delta z_{\mathrm{gain},t} + 14.0\,(\Delta z_{\mathrm{gain},t})^2, \\
+r_{\mathrm{launch}} &=
+\begin{cases}
+0.5\,\mathrm{clip}(z_{\mathrm{stand}} - z_{\min,t},\,0,\,0.24)\,\exp(-6\,\theta_{p,t}^2), & t < 14 \land \neg\mathrm{takeoff}_t, \\
+3.5\,[z_{\mathrm{bal},t} - z_{\mathrm{stand}}]_+ + 1.8\,[z_{\mathrm{bal},t} - z_{\min,t}]_+\,\mathbb{I}(v_{z,t} > 0.1) + 2.0\,[z_t - z_{\mathrm{stand}}]_+, & \text{otherwise},
+\end{cases} \\
+r_{\mathrm{apex}} &=
+\begin{cases}
+\bigl(45.0\,\Delta z_{\mathrm{gain},t} + 90.0\,(\Delta z_{\mathrm{gain},t})^2\bigr)\bigl(0.4 + 0.6\,m_{\mathrm{up}}\bigr), & \text{at apex termination}, \\
+0, & \text{otherwise},
+\end{cases} \\
+m_{\mathrm{up}} &= \exp\!\bigl(-6.0\,\theta_{p,t}^2 - 2.5\,x_t^2\bigr), \\
+p_{\mathrm{sym}} &= -0.15\Bigl(\lVert \mathbf{q}_{L,t} - \mathbf{q}_{R,t} \rVert_2^2 + \lVert \mathbf{a}_{L,t} - \mathbf{a}_{R,t} \rVert_2^2\Bigr), \qquad
+p_{\mathrm{act}} = -0.005\,\lVert \mathbf{a}_t - \mathbf{a}_{t-1} \rVert_2^2, \\
+p_{\mathrm{inj}} &= -2.5\Bigl(\lVert [\mathbf{q}_{\min}^{\mathrm{safe}} - \mathbf{q}_{j,t}]_+ \rVert_2^2 + \lVert [\mathbf{q}_{j,t} - \mathbf{q}_{\max}^{\mathrm{safe}}]_+ \rVert_2^2\Bigr), \\
+p_{\mathrm{MTG}} &=
+\begin{cases}
+-0.40\,\lVert \bar{\mathbf{e}}_{\mathrm{MTG},t} \rVert_2^2, & \text{Mode 2, Phase 1 (\texttt{soft})}, \\
+0, & \text{Mode 1 or Mode 2, Phase 2 (\texttt{hard})}.
+\end{cases}
+\end{align}

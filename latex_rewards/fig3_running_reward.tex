@@ -1,0 +1,34 @@
+% =============================================================================
+% Reward Function — Figure 3 (Experiment 3: Fast Running Imitation at 5.0 m/s)
+% Source: SprintTrackingEnv.step() in run_all_experiments.py
+% =============================================================================
+\subsection*{Figure 3: Fast Running Imitation ($5.0\;\mathrm{m/s}$, \texttt{SprintTrackingEnv})}
+
+To track high-speed flight-phase running kinematics, \texttt{SprintTrackingEnv} adds joint-velocity tracking ($r_{\dot{q}}$), tighter vertical height/velocity tracking ($r_z$), and stricter fall/speed termination bounds:
+\begin{equation}
+r_t^{\mathrm{run}} =
+\begin{cases}
+0, & \text{if } \mathrm{fell}_t, \\[6pt]
+0.10 + 0.25\,r_q + 0.05\,r_{\dot{q}} + 0.20\,r_{\mathrm{rot}} + 0.20\,r_{\mathrm{vel}} + 0.05\,r_x + 0.15\,r_z + 0.10\,r_{\mathrm{cart}} + p_{\mathrm{act}} + p_{\mathrm{MTG}}, & \text{otherwise},
+\end{cases}
+\end{equation}
+with termination condition
+\begin{equation}
+\mathrm{fell}_t \iff \bigl(z_t < 0.72\;\mathrm{m}\bigr) \;\lor\; \bigl(z_t > 0.99\;\mathrm{m}\bigr) \;\lor\; \bigl(|z_t - z_t^{\mathrm{ref}}| > 0.085\;\mathrm{m}\bigr) \;\lor\; \bigl(|\theta_{p,t} - \theta_{p,t}^{\mathrm{ref}}| > 0.45\;\mathrm{rad}\bigr) \;\lor\; \bigl(v_{x,t} < 3.0\;\mathrm{m/s}\bigr),
+\end{equation}
+and component terms:
+\begin{align}
+r_q &= \exp\!\Bigl(-30\,\frac{1}{7}\lVert \mathbf{q}_{j,t} - \mathbf{q}_{j,t}^{\mathrm{ref}} \rVert_2^2\Bigr), \qquad
+r_{\dot{q}} = \exp\!\Bigl(-0.25\,\frac{1}{7}\lVert \dot{\mathbf{q}}_{j,t} - \dot{\mathbf{q}}_{j,t}^{\mathrm{ref}} \rVert_2^2\Bigr), \\
+r_{\mathrm{rot}} &= \exp\!\Bigl(-30\,(\theta_{p,t} - \theta_{p,t}^{\mathrm{ref}})^2 - 1.0\,(\dot{\theta}_{p,t} - \dot{\theta}_{p,t}^{\mathrm{ref}})^2\Bigr), \\
+r_z &= \exp\!\Bigl(-80\,(z_t - z_t^{\mathrm{ref}})^2 - 2.0\,(v_{z,t} - v_{z,t}^{\mathrm{ref}})^2\Bigr), \\
+r_{\mathrm{vel}} &= \exp\!\Bigl(-6\,(v_{x,t} - v_{x,t}^{\mathrm{ref}})^2\Bigr), \qquad
+r_x = \exp\!\Bigl(-5\,(x_t - x_t^{\mathrm{ref}})^2\Bigr), \\
+r_{\mathrm{cart}} &= \exp\!\Bigl(-15\,\frac{1}{6}\lVert \mathbf{p}_{\mathrm{ee},t}^{\mathrm{rel}} - \mathbf{p}_{\mathrm{ee},t}^{\mathrm{rel,ref}} \rVert_2^2\Bigr), \qquad
+p_{\mathrm{act}} = -0.01\,\lVert \mathbf{a}_t - \mathbf{a}_{t-1} \rVert_2^2, \\
+p_{\mathrm{MTG}} &=
+\begin{cases}
+-0.35\,\lVert \bar{\mathbf{e}}_{\mathrm{MTG},t} \rVert_2^2, & \text{Mode 2, Phase 1 (\texttt{soft})}, \\
+0, & \text{Mode 1 or Mode 2, Phase 2 (\texttt{hard})}.
+\end{cases}
+\end{align}

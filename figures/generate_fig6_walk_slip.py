@@ -221,8 +221,8 @@ def main():
             sp.set_edgecolor("#DC2626" if is_slip else "#CBD5E1")
             sp.set_linewidth(2.0 if is_slip else 1.1)
         ax_img.set_title(
-            f"$t = {st*0.02:.2f}$ s  ({phase_labels[idx]})",
-            fontsize=9.1, fontweight="bold",
+            f"$t = {st*0.02:.2f}$ s",
+            fontsize=9.5, fontweight="bold",
             color="#B91C1C" if is_slip else "#1E293B", pad=5
         )
         if idx == 0:

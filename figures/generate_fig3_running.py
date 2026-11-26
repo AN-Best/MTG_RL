@@ -180,7 +180,7 @@ def main():
             sp.set_visible(True)
             sp.set_edgecolor("#CBD5E1")
             sp.set_linewidth(1.1)
-        ax_img.set_title(f"$t = {st*0.02:.2f}$ s  ({phase_labels[idx]})", fontsize=9.2, fontweight="bold", color="#1E293B", pad=5)
+        ax_img.set_title(f"$t = {st*0.02:.2f}$ s", fontsize=9.5, fontweight="bold", color="#1E293B", pad=5)
         if idx == 0:
             ax_img.text(-0.08, 1.12, "A", transform=ax_img.transAxes, fontsize=14, fontweight="bold", color="#0F172A", va="bottom", ha="right")
 

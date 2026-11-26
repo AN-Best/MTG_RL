@@ -144,8 +144,8 @@ def main():
     draw_box(
         ax, 2.95, 4.45, 1.85, 1.35,
         "Action Filter &\nSub-Step Interp.",
-        "$\\tilde{a}_k = 0.4\\tilde{a}_{k-1} + 0.6a_t$\n(10 sub-steps)",
-        fc="#FFFFFF", ec="#2B5B84", title_color="#1B3B5A", body_fs=7.6
+        "$\\tilde{a}_t = \\alpha\\tilde{a}_{t-1} + (1{-}\\alpha)a_t$\n(10 sub-steps)",
+        fc="#FFFFFF", ec="#2B5B84", title_color="#1B3B5A", body_fs=7.4
     )
 
     draw_box(
@@ -323,7 +323,7 @@ def main():
     )
     ax.text(
         8.20, fb_y_50 - 0.12,
-        "50 Hz RL Observation $o_t = [q,\\, \\dot{q},\\, e_q,\\, e_{\\dot{q}},\\, \\mathrm{CoM/EE},\\, F_{\\mathrm{contact}},\\, \\tilde{a}_{t-1},\\, \\phi]$",
+        "50 Hz RL Observation $o_t = [q,\\, \\dot{q},\\, e_q,\\, e_{\\dot{q}},\\, \\mathrm{CoM},\\, \\mathrm{End\\,Effectors},\\, F_{\\mathrm{contact}},\\, \\tilde{a}_{t-1},\\, \\phi]$",
         ha="center", va="top", fontsize=8.3, color="#1B3B5A", fontweight="bold"
     )
 
